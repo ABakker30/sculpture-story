@@ -1,5 +1,14 @@
 import * as THREE from 'three'
 
+export interface CrossSectionIntersection {
+  crossSectionName: string
+  crossSectionIndex: number
+  intersectionPoint: THREE.Vector3
+  planeNormal: THREE.Vector3
+  centroid: THREE.Vector3
+  pathParameter: number
+}
+
 export interface DerivedGeometry {
   corners: THREE.Vector3[]
   curveSamples: THREE.Vector3[]
@@ -7,6 +16,7 @@ export interface DerivedGeometry {
   latticeSpheres: THREE.Mesh[]
   latticeSticks: THREE.Line[]
   stars: THREE.Group[]
+  crossSectionIntersections: CrossSectionIntersection[]
 }
 
 export interface DerivationConfig {
@@ -217,6 +227,7 @@ export class GeometryDeriver {
       latticeSpheres: lattice.spheres,
       latticeSticks: lattice.sticks,
       stars,
+      crossSectionIntersections: [],
     }
 
     return this.derived
@@ -224,6 +235,23 @@ export class GeometryDeriver {
 
   getDerived(): DerivedGeometry | null {
     return this.derived
+  }
+
+  computeIntersections(
+    pathOrCurve: THREE.Vector3[],
+    crossSections: Map<string, THREE.Vector3[]>
+  ): CrossSectionIntersection[] {
+    const intersections = computeCrossSectionIntersections(pathOrCurve, crossSections)
+    
+    if (this.derived) {
+      this.derived.crossSectionIntersections = intersections
+    }
+    
+    return intersections
+  }
+
+  getIntersections(): CrossSectionIntersection[] {
+    return this.derived?.crossSectionIntersections ?? []
   }
 
   updateConfig(config: Partial<DerivationConfig>): void {
@@ -257,6 +285,124 @@ export class GeometryDeriver {
       this.derived = null
     }
   }
+}
+
+export function computeCrossSectionPlane(
+  crossSectionVertices: THREE.Vector3[]
+): { centroid: THREE.Vector3; normal: THREE.Vector3 } | null {
+  if (crossSectionVertices.length < 3) return null
+
+  const centroid = new THREE.Vector3()
+  for (const v of crossSectionVertices) {
+    centroid.add(v)
+  }
+  centroid.divideScalar(crossSectionVertices.length)
+
+  const v0 = crossSectionVertices[0]
+  const v1 = crossSectionVertices[Math.floor(crossSectionVertices.length / 3)]
+  const v2 = crossSectionVertices[Math.floor(crossSectionVertices.length * 2 / 3)]
+
+  const edge1 = new THREE.Vector3().subVectors(v1, v0)
+  const edge2 = new THREE.Vector3().subVectors(v2, v0)
+  const normal = new THREE.Vector3().crossVectors(edge1, edge2).normalize()
+
+  if (normal.lengthSq() < 0.0001) return null
+
+  return { centroid, normal }
+}
+
+export function findPlaneLineIntersection(
+  planePoint: THREE.Vector3,
+  planeNormal: THREE.Vector3,
+  linePoints: THREE.Vector3[]
+): { point: THREE.Vector3; parameter: number } | null {
+  if (linePoints.length < 2) return null
+
+  let bestIntersection: { point: THREE.Vector3; parameter: number; distance: number } | null = null
+
+  for (let i = 0; i < linePoints.length - 1; i++) {
+    const p0 = linePoints[i]
+    const p1 = linePoints[i + 1]
+    const lineDir = new THREE.Vector3().subVectors(p1, p0)
+    const lineLength = lineDir.length()
+    if (lineLength < 0.0001) continue
+    lineDir.normalize()
+
+    const denom = planeNormal.dot(lineDir)
+    if (Math.abs(denom) < 0.0001) continue
+
+    const t = planeNormal.dot(new THREE.Vector3().subVectors(planePoint, p0)) / denom
+
+    if (t >= 0 && t <= lineLength) {
+      const intersection = new THREE.Vector3().copy(p0).addScaledVector(lineDir, t)
+      const distToPlanePoint = intersection.distanceTo(planePoint)
+
+      const globalT = (i + t / lineLength) / (linePoints.length - 1)
+
+      if (!bestIntersection || distToPlanePoint < bestIntersection.distance) {
+        bestIntersection = { point: intersection, parameter: globalT, distance: distToPlanePoint }
+      }
+    }
+  }
+
+  return bestIntersection ? { point: bestIntersection.point, parameter: bestIntersection.parameter } : null
+}
+
+export function computeCrossSectionIntersections(
+  pathOrCurve: THREE.Vector3[],
+  crossSections: Map<string, THREE.Vector3[]>
+): CrossSectionIntersection[] {
+  const intersections: CrossSectionIntersection[] = []
+
+  const sortedNames = Array.from(crossSections.keys()).sort((a, b) => {
+    const numA = parseInt(a.replace('CROSS_SECTION_', ''), 10)
+    const numB = parseInt(b.replace('CROSS_SECTION_', ''), 10)
+    return numA - numB
+  })
+
+  for (let idx = 0; idx < sortedNames.length; idx++) {
+    const name = sortedNames[idx]
+    const vertices = crossSections.get(name)!
+    const plane = computeCrossSectionPlane(vertices)
+
+    if (!plane) {
+      console.warn(`[GeometryDerivation] Could not compute plane for ${name}`)
+      continue
+    }
+
+    const intersection = findPlaneLineIntersection(plane.centroid, plane.normal, pathOrCurve)
+
+    if (intersection) {
+      intersections.push({
+        crossSectionName: name,
+        crossSectionIndex: idx,
+        intersectionPoint: intersection.point,
+        planeNormal: plane.normal,
+        centroid: plane.centroid,
+        pathParameter: intersection.parameter
+      })
+    } else {
+      intersections.push({
+        crossSectionName: name,
+        crossSectionIndex: idx,
+        intersectionPoint: plane.centroid.clone(),
+        planeNormal: plane.normal,
+        centroid: plane.centroid,
+        pathParameter: idx / (sortedNames.length - 1)
+      })
+    }
+  }
+
+  console.info(`[GeometryDerivation] Computed ${intersections.length} cross-section intersections`)
+  console.info(`[GeometryDerivation] Expected: ${crossSections.size}, Found: ${intersections.length}`)
+  
+  if (intersections.length === crossSections.size) {
+    console.info(`[GeometryDerivation] ✓ Intersection count matches cross-section count`)
+  } else {
+    console.warn(`[GeometryDerivation] ✗ Intersection count mismatch`)
+  }
+
+  return intersections
 }
 
 export const geometryDeriver = new GeometryDeriver()
