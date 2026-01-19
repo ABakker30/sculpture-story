@@ -31,6 +31,7 @@ interface DebugSceneProps {
   galaxySize: number
   cameraViewpoint: number
   cameraFov: number
+  useGpu: boolean
   onCameraViewpointsComputed: (viewpoints: CameraViewpoint[]) => void
 }
 
@@ -263,7 +264,7 @@ function generateLatticePoints(
   return points
 }
 
-function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, onCameraViewpointsComputed }: DebugSceneProps) {
+function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed }: DebugSceneProps) {
   const { scene, gl, camera } = useThree()
   const meshRef = useRef<THREE.Mesh | null>(null)
   const crossSectionsRef = useRef<THREE.Group | null>(null)
@@ -598,7 +599,9 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       return
     }
     
-    const starGeo = new THREE.SphereGeometry(starSize, 12, 8)
+    const starSegments = useGpu ? 24 : 12
+    const starRings = useGpu ? 16 : 8
+    const starGeo = new THREE.SphereGeometry(starSize, starSegments, starRings)
     const instancedMesh = new THREE.InstancedMesh(
       starGeo,
       materialController.getMaterial(),
@@ -628,7 +631,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     scene.add(instancedMesh)
     starsRef.current = instancedMesh
     
-  }, [starDensity, starScale, cosmicScale, galaxySize, initialized, scene])
+  }, [starDensity, starScale, cosmicScale, galaxySize, initialized, scene, useGpu])
 
   // Atom bonds effect (using InstancedMesh + spatial hashing for O(n) performance)
   // Creates tubes connecting each star to its 12 nearest neighbors
@@ -805,7 +808,9 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     const sphereGroup = new THREE.Group()
     sphereGroup.name = 'PATH_CORNER_SPHERES'
     
-    const sphereGeo = new THREE.SphereGeometry(sphereRadius, 16, 12)
+    const sphereSegments = useGpu ? 32 : 16
+    const sphereRings = useGpu ? 24 : 12
+    const sphereGeo = new THREE.SphereGeometry(sphereRadius, sphereSegments, sphereRings)
     
     pathCorners.forEach(pos => {
       const sphere = new THREE.Mesh(sphereGeo, materialController.getMaterial())
@@ -818,7 +823,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     scene.add(sphereGroup)
     spheresRef.current = sphereGroup
     
-  }, [sphereRadius, initialized, scene])
+  }, [sphereRadius, initialized, scene, useGpu])
 
   useEffect(() => {
     if (!initialized || !dataRef.current) return
@@ -1184,7 +1189,7 @@ export function AppLanding() {
         }}
       >
         {debugMode ? (
-          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} onCameraViewpointsComputed={setCameraViewpoints} />
+          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} />
         ) : (
           <SculptureScene onSculptureLoaded={handleSculptureLoaded} />
         )}
