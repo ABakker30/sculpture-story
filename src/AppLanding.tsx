@@ -974,25 +974,6 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   )
 }
 
-function _normalizeSections(sections: THREE.Vector3[][]): THREE.Vector3[][] {
-  const maxVerts = Math.max(...sections.map(s => s.length))
-  const target = Math.max(maxVerts, 32)
-  
-  return sections.map(section => {
-    if (section.length === target) return section
-    const resampled: THREE.Vector3[] = []
-    for (let i = 0; i < target; i++) {
-      const t = i / target
-      const srcIdx = t * section.length
-      const i0 = Math.floor(srcIdx) % section.length
-      const i1 = (i0 + 1) % section.length
-      const frac = srcIdx - Math.floor(srcIdx)
-      resampled.push(new THREE.Vector3().lerpVectors(section[i0], section[i1], frac))
-    }
-    return resampled
-  })
-}
-
 function createLoftGeometry(sections: THREE.Vector3[][]): THREE.BufferGeometry {
   const vps = sections[0].length
   const positions: number[] = []
