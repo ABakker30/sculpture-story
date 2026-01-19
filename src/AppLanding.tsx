@@ -842,7 +842,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       : (loftProgress - circlePhaseStart) / (1.0 - circlePhaseStart)
     
     // Straighten: interpolate centroids toward polylinear path between corners
-    const straightenedCentroids = centroids.map((centroid, i) => {
+    const straightenedCentroids = centroids.map((centroid, _i) => {
       if (straighten === 0 || pathCorners.length < 2) return centroid.clone()
       
       // Find closest segment on polylinear path
@@ -974,7 +974,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   )
 }
 
-function normalizeSections(sections: THREE.Vector3[][]): THREE.Vector3[][] {
+function _normalizeSections(sections: THREE.Vector3[][]): THREE.Vector3[][] {
   const maxVerts = Math.max(...sections.map(s => s.length))
   const target = Math.max(maxVerts, 32)
   
@@ -1110,7 +1110,7 @@ function SculptureScene({ onSculptureLoaded }: { onSculptureLoaded: (data: Sculp
 function LoadingIndicator() {
   const meshRef = useRef<THREE.Mesh>(null)
 
-  useFrame((_, delta) => {
+  useFrame((_state: unknown, delta: number) => {
     if (meshRef.current) {
       meshRef.current.rotation.y += delta * 2
     }
