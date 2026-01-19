@@ -11,7 +11,22 @@
   to = "/index.html"
   status = 200
 
-# Cache static assets
+# Never cache HTML - forces browser to always fetch latest
+[[headers]]
+  for = "/*.html"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"
+    Pragma = "no-cache"
+    Expires = "0"
+
+[[headers]]
+  for = "/"
+  [headers.values]
+    Cache-Control = "no-cache, no-store, must-revalidate"
+    Pragma = "no-cache"
+    Expires = "0"
+
+# Cache static assets with content hash (immutable)
 [[headers]]
   for = "/assets/*"
   [headers.values]
