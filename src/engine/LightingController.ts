@@ -48,7 +48,7 @@ class LightingController {
   private ambientLight: THREE.AmbientLight | null = null
 
   private environments: HDREnvironment[] = [...BUILT_IN_ENVIRONMENTS]
-  private currentEnvironmentIndex: number = 0
+  private currentEnvironmentIndex: number = 1
 
   constructor(config: Partial<LightingConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config }
@@ -60,9 +60,12 @@ class LightingController {
     this.pmremGenerator.compileEquirectangularShader()
 
     this.setupLights()
-    this.createFallbackEnvironment()
-
-    console.info('[LightingController] Initialized with fallback environment')
+    
+    // Load the default environment (Studio) and set intensity after load
+    this.loadEnvironment(this.currentEnvironmentIndex).then(() => {
+      this.setEnvironmentIntensity(this.config.environmentIntensity)
+      console.info('[LightingController] Initialized with Studio environment')
+    })
   }
 
   private setupLights(): void {
