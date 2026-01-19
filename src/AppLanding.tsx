@@ -9,6 +9,8 @@ import sculptureBuilder, { SculptureData } from './engine/SculptureBuilder'
 import lightingController from './engine/LightingController'
 import materialController from './engine/MaterialController'
 import cameraController from './engine/CameraController'
+import { computeHullCameraPositions, CameraViewpoint } from './engine/ConvexHullCamera'
+import { isWebGPUSupported, getRendererInfo } from './engine/RendererFactory'
 import presetCapture from './engine/PresetCapture'
 import modeController, { AppMode } from './engine/ModeController'
 
@@ -24,6 +26,12 @@ interface DebugSceneProps {
   sphereRadius: number
   starDensity: number
   cosmicScale: number
+  bondDensity: number
+  starScale: number
+  galaxySize: number
+  cameraViewpoint: number
+  cameraFov: number
+  onCameraViewpointsComputed: (viewpoints: CameraViewpoint[]) => void
 }
 
 // Detect lattice type from corner distances and angles
@@ -255,14 +263,20 @@ function generateLatticePoints(
   return points
 }
 
-function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale }: DebugSceneProps) {
+function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, onCameraViewpointsComputed }: DebugSceneProps) {
   const { scene, gl, camera } = useThree()
   const meshRef = useRef<THREE.Mesh | null>(null)
   const crossSectionsRef = useRef<THREE.Group | null>(null)
   const spheresRef = useRef<THREE.Group | null>(null)
-  const starsRef = useRef<THREE.Group | null>(null)
+  const starsRef = useRef<THREE.InstancedMesh | null>(null)
+  const bondsRef = useRef<THREE.InstancedMesh | null>(null)
   const starPositionsRef = useRef<THREE.Vector3[]>([])
   const latticePointsRef = useRef<THREE.Vector3[]>([])
+  const latticeTypeRef = useRef<'SC' | 'BCC' | 'FCC'>('SC')
+  const latticeConstantRef = useRef<number>(1)
+  const cameraViewpointsRef = useRef<CameraViewpoint[]>([])
+  const targetCameraPos = useRef<THREE.Vector3 | null>(null)
+  const targetCameraLookAt = useRef<THREE.Vector3 | null>(null)
   const dataRef = useRef<{
     sortedSections: THREE.Vector3[][]
     sortedNames: string[]
@@ -272,6 +286,39 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   } | null>(null)
   const controlsRef = useRef<any>(null)
   const [initialized, setInitialized] = useState(false)
+  
+  // Reference FOV for distance compensation (50mm lens = ~39.6° FOV)
+  const baseFovRef = useRef<number>(39.6)
+  const baseDistanceRef = useRef<number | null>(null)
+  const fovTargetRef = useRef<THREE.Vector3 | null>(null)
+  
+  // Update camera FOV and distance to keep sculpture at same apparent size
+  useEffect(() => {
+    if (!initialized) return
+    if (!(camera instanceof THREE.PerspectiveCamera)) return
+    
+    // Store initial distance on first FOV change
+    if (baseDistanceRef.current === null) {
+      const target = controlsRef.current?.target?.clone() || new THREE.Vector3(0, 0, 0)
+      fovTargetRef.current = target
+      baseDistanceRef.current = camera.position.distanceTo(target)
+    }
+    
+    // Calculate distance multiplier to maintain same apparent size
+    // distance_new = distance_base * tan(baseFov/2) / tan(newFov/2)
+    const baseFovRad = (baseFovRef.current * Math.PI) / 180
+    const newFovRad = (cameraFov * Math.PI) / 180
+    const distanceMultiplier = Math.tan(baseFovRad / 2) / Math.tan(newFovRad / 2)
+    const newDistance = baseDistanceRef.current * distanceMultiplier
+    
+    // Move camera along its current direction from target
+    const target = fovTargetRef.current || new THREE.Vector3(0, 0, 0)
+    const direction = camera.position.clone().sub(target).normalize()
+    camera.position.copy(target.clone().add(direction.multiplyScalar(newDistance)))
+    
+    camera.fov = cameraFov
+    camera.updateProjectionMatrix()
+  }, [cameraFov, camera, initialized])
 
   useEffect(() => {
     async function loadData() {
@@ -329,6 +376,8 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       
       // Detect lattice type and generate lattice points (4x bounding sphere)
       const { type: latticeType, latticeConstant } = detectLatticeType(pathCorners)
+      latticeTypeRef.current = latticeType
+      latticeConstantRef.current = latticeConstant
       const latticeRadius = boundingSphere.radius * 4
       latticePointsRef.current = generateLatticePoints(boundingSphere.center, latticeRadius, latticeConstant, latticeType, pathCorners)
       
@@ -336,7 +385,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       // Generate enough to match lattice points or exceed for cosmic view
       const cosmicRadius = boundingSphere.radius * 10
       const numCosmicStars = Math.max(latticePointsRef.current.length, pathCorners.length * 50)
-      starPositionsRef.current = Array.from({ length: numCosmicStars }, () => {
+      const unsortedCosmicPositions = Array.from({ length: numCosmicStars }, () => {
         const theta = Math.random() * Math.PI * 2
         const phi = Math.acos(2 * Math.random() - 1)
         const r = Math.cbrt(Math.random()) * cosmicRadius // cube root for uniform volume distribution
@@ -347,7 +396,52 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         )
       })
       
+      // Sort cosmic positions by nearest lattice point for smooth interpolation
+      // This ensures each star moves toward its closest lattice target
+      const lattice = latticePointsRef.current
+      const sortedCosmicPositions: THREE.Vector3[] = []
+      const usedCosmicIndices = new Set<number>()
+      
+      for (let li = 0; li < lattice.length; li++) {
+        const latticePos = lattice[li]
+        let bestIdx = -1
+        let bestDist = Infinity
+        
+        // Find closest unused cosmic position to this lattice point
+        for (let ci = 0; ci < unsortedCosmicPositions.length; ci++) {
+          if (!usedCosmicIndices.has(ci)) {
+            const dist = latticePos.distanceTo(unsortedCosmicPositions[ci])
+            if (dist < bestDist) {
+              bestDist = dist
+              bestIdx = ci
+            }
+          }
+        }
+        
+        if (bestIdx >= 0) {
+          usedCosmicIndices.add(bestIdx)
+          sortedCosmicPositions.push(unsortedCosmicPositions[bestIdx])
+        } else {
+          // Fallback: use a random position if none left
+          sortedCosmicPositions.push(unsortedCosmicPositions[li % unsortedCosmicPositions.length])
+        }
+      }
+      
+      // Add remaining cosmic positions for when numCosmicStars > lattice.length
+      for (let ci = 0; ci < unsortedCosmicPositions.length; ci++) {
+        if (!usedCosmicIndices.has(ci)) {
+          sortedCosmicPositions.push(unsortedCosmicPositions[ci])
+        }
+      }
+      
+      starPositionsRef.current = sortedCosmicPositions
+      
       dataRef.current = { sortedSections, sortedNames, pathCorners, centroids, boundingSphere }
+      
+      // Compute convex hull camera viewpoints
+      const viewpoints = computeHullCameraPositions(pathCorners)
+      cameraViewpointsRef.current = viewpoints
+      onCameraViewpointsComputed(viewpoints)
       
       console.info(`[DEBUG] Loaded ${sortedNames.length} cross-sections`)
       console.info(`[DEBUG] Path corners: ${pathCorners.length} unique vertices`)
@@ -366,19 +460,109 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       if (meshRef.current) scene.remove(meshRef.current)
       if (crossSectionsRef.current) scene.remove(crossSectionsRef.current)
       if (spheresRef.current) scene.remove(spheresRef.current)
-      if (starsRef.current) scene.remove(starsRef.current)
+      if (starsRef.current) {
+        scene.remove(starsRef.current)
+        starsRef.current.geometry.dispose()
+      }
+      if (bondsRef.current) {
+        scene.remove(bondsRef.current)
+        bondsRef.current.geometry.dispose()
+      }
     }
-  }, [scene, gl, camera, onLoaded])
+  // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [scene, gl, camera])
 
-  // Galaxy stars effect with cosmic scaler
+  // Camera viewpoint effect - animate to selected viewpoint
+  useEffect(() => {
+    if (!initialized || cameraViewpointsRef.current.length === 0) return
+    if (cameraViewpoint < 0) {
+      // Reset to free camera mode
+      targetCameraPos.current = null
+      targetCameraLookAt.current = null
+      return
+    }
+    
+    const viewpoint = cameraViewpointsRef.current[cameraViewpoint % cameraViewpointsRef.current.length]
+    if (viewpoint) {
+      targetCameraPos.current = viewpoint.position.clone()
+      targetCameraLookAt.current = viewpoint.target.clone()
+      console.info(`[Camera] Moving to ${viewpoint.label} (${viewpoint.type})`)
+    }
+  }, [cameraViewpoint, initialized])
+
+  // Regenerate lattice and cosmic positions when galaxySize changes
+  useEffect(() => {
+    if (!initialized || !dataRef.current) return
+    
+    const { pathCorners, boundingSphere } = dataRef.current
+    const { type: latticeType, latticeConstant } = detectLatticeType(pathCorners)
+    latticeTypeRef.current = latticeType
+    latticeConstantRef.current = latticeConstant
+    
+    // Generate lattice points based on galaxySize (1x-10x bounding sphere radius)
+    const latticeRadius = boundingSphere.radius * galaxySize
+    latticePointsRef.current = generateLatticePoints(boundingSphere.center, latticeRadius, latticeConstant, latticeType, pathCorners)
+    
+    // Generate cosmic positions matching the galaxy size
+    const cosmicRadius = boundingSphere.radius * galaxySize
+    const numCosmicStars = Math.max(latticePointsRef.current.length, pathCorners.length * 50)
+    const unsortedCosmicPositions = Array.from({ length: numCosmicStars }, () => {
+      const theta = Math.random() * Math.PI * 2
+      const phi = Math.acos(2 * Math.random() - 1)
+      const r = Math.cbrt(Math.random()) * cosmicRadius
+      return new THREE.Vector3(
+        boundingSphere.center.x + r * Math.sin(phi) * Math.cos(theta),
+        boundingSphere.center.y + r * Math.sin(phi) * Math.sin(theta),
+        boundingSphere.center.z + r * Math.cos(phi)
+      )
+    })
+    
+    // Sort cosmic positions by nearest lattice point for smooth interpolation
+    const lattice = latticePointsRef.current
+    const sortedCosmicPositions: THREE.Vector3[] = []
+    const usedCosmicIndices = new Set<number>()
+    
+    for (let li = 0; li < lattice.length; li++) {
+      const latticePos = lattice[li]
+      let bestIdx = -1
+      let bestDist = Infinity
+      
+      for (let ci = 0; ci < unsortedCosmicPositions.length; ci++) {
+        if (!usedCosmicIndices.has(ci)) {
+          const dist = latticePos.distanceTo(unsortedCosmicPositions[ci])
+          if (dist < bestDist) {
+            bestDist = dist
+            bestIdx = ci
+          }
+        }
+      }
+      
+      if (bestIdx >= 0) {
+        usedCosmicIndices.add(bestIdx)
+        sortedCosmicPositions.push(unsortedCosmicPositions[bestIdx])
+      } else {
+        sortedCosmicPositions.push(unsortedCosmicPositions[li % unsortedCosmicPositions.length])
+      }
+    }
+    
+    for (let ci = 0; ci < unsortedCosmicPositions.length; ci++) {
+      if (!usedCosmicIndices.has(ci)) {
+        sortedCosmicPositions.push(unsortedCosmicPositions[ci])
+      }
+    }
+    
+    starPositionsRef.current = sortedCosmicPositions
+    
+    console.info(`[Galaxy] Size ${galaxySize.toFixed(1)}x, lattice points: ${latticePointsRef.current.length}, cosmic stars: ${sortedCosmicPositions.length}`)
+  }, [galaxySize, initialized])
+
+  // Galaxy stars effect (using InstancedMesh for performance)
   useEffect(() => {
     if (!initialized || !dataRef.current) return
     
     if (starsRef.current) {
       scene.remove(starsRef.current)
-      starsRef.current.traverse((obj) => {
-        if (obj instanceof THREE.Mesh) obj.geometry.dispose()
-      })
+      starsRef.current.geometry.dispose()
     }
     
     if (starDensity <= 0) {
@@ -386,9 +570,11 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       return
     }
     
-    // Star size scales with density, max 90% of corner sphere radius
-    const maxStarSize = sphereRadius * 0.9
-    const starSize = starDensity * maxStarSize
+    // Star size: at starScale=1, radius = 0.5 * latticeConstant (spheres just touch)
+    // starScale controls how large the stars are relative to this maximum
+    const latticeConstant = latticeConstantRef.current
+    const maxStarRadius = latticeConstant * 0.5 // Touching spheres
+    const starSize = starScale * maxStarRadius
     
     if (starSize <= 0) {
       starsRef.current = null
@@ -412,14 +598,18 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       return
     }
     
-    const starsGroup = new THREE.Group()
-    starsGroup.name = 'GALAXY_STARS'
+    const starGeo = new THREE.SphereGeometry(starSize, 12, 8)
+    const instancedMesh = new THREE.InstancedMesh(
+      starGeo,
+      materialController.getMaterial(),
+      numStars
+    )
+    instancedMesh.name = 'GALAXY_STARS_INSTANCED'
     
-    const starGeo = new THREE.SphereGeometry(starSize, 32, 24)
+    const matrix = new THREE.Matrix4()
+    const position = new THREE.Vector3()
     
     for (let i = 0; i < numStars; i++) {
-      const star = new THREE.Mesh(starGeo, materialController.getMaterial())
-      
       // Get cosmic position (wrap if needed)
       const cosmicPos = cosmicPositions[i % cosmicPositions.length]
       
@@ -427,15 +617,173 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       const latticePos = latticePoints[i % latticePoints.length]
       
       // Interpolate between cosmic and lattice position
-      star.position.lerpVectors(cosmicPos, latticePos, cosmicScale)
+      position.lerpVectors(cosmicPos, latticePos, cosmicScale)
       
-      starsGroup.add(star)
+      matrix.setPosition(position)
+      instancedMesh.setMatrixAt(i, matrix)
     }
     
-    scene.add(starsGroup)
-    starsRef.current = starsGroup
+    instancedMesh.instanceMatrix.needsUpdate = true
     
-  }, [starDensity, sphereRadius, cosmicScale, initialized, scene])
+    scene.add(instancedMesh)
+    starsRef.current = instancedMesh
+    
+  }, [starDensity, starScale, cosmicScale, galaxySize, initialized, scene])
+
+  // Atom bonds effect (using InstancedMesh + spatial hashing for O(n) performance)
+  // Creates tubes connecting each star to its 12 nearest neighbors
+  useEffect(() => {
+    if (!initialized || !dataRef.current) return
+    
+    if (bondsRef.current) {
+      scene.remove(bondsRef.current)
+      bondsRef.current.geometry.dispose()
+    }
+    
+    if (bondDensity <= 0) {
+      bondsRef.current = null
+      return
+    }
+    
+    const latticePoints = latticePointsRef.current
+    const cosmicPositions = starPositionsRef.current
+    const latticeConstant = latticeConstantRef.current
+    
+    // Use the same star positions as the stars effect
+    const numCosmicStars = Math.floor(starDensity * cosmicPositions.length)
+    const numLatticeStars = latticePoints.length
+    const numStars = Math.round(
+      numCosmicStars * (1 - cosmicScale) + numLatticeStars * cosmicScale
+    )
+    
+    if (numStars < 2) {
+      bondsRef.current = null
+      return
+    }
+    
+    // Calculate current star positions
+    const starPositions: THREE.Vector3[] = []
+    for (let i = 0; i < numStars; i++) {
+      const cosmicPos = cosmicPositions[i % cosmicPositions.length]
+      const latticePos = latticePoints[i % latticePoints.length]
+      const pos = new THREE.Vector3().lerpVectors(cosmicPos, latticePos, cosmicScale)
+      starPositions.push(pos)
+    }
+    
+    // SPATIAL HASHING: O(n) neighbor finding
+    // Cell size based on lattice constant (neighbors are ~1 cell away)
+    const cellSize = latticeConstant * 1.5
+    const maxBondDist = latticeConstant * 1.8 // Only bond to points within this distance
+    
+    // Build spatial hash: Map<cellKey, pointIndices[]>
+    const spatialHash = new Map<string, number[]>()
+    const getCellKey = (p: THREE.Vector3) => {
+      const cx = Math.floor(p.x / cellSize)
+      const cy = Math.floor(p.y / cellSize)
+      const cz = Math.floor(p.z / cellSize)
+      return `${cx},${cy},${cz}`
+    }
+    
+    // Insert all points into spatial hash - O(n)
+    for (let i = 0; i < starPositions.length; i++) {
+      const key = getCellKey(starPositions[i])
+      if (!spatialHash.has(key)) spatialHash.set(key, [])
+      spatialHash.get(key)!.push(i)
+    }
+    
+    // Find neighbors using spatial hash - O(n * k) where k is avg points per 27 cells
+    const bonds: { start: THREE.Vector3, end: THREE.Vector3 }[] = []
+    const addedBonds = new Set<string>()
+    
+    for (let i = 0; i < starPositions.length; i++) {
+      const pos = starPositions[i]
+      const cx = Math.floor(pos.x / cellSize)
+      const cy = Math.floor(pos.y / cellSize)
+      const cz = Math.floor(pos.z / cellSize)
+      
+      // Check this cell and 26 adjacent cells
+      const candidates: { idx: number, dist: number }[] = []
+      for (let dx = -1; dx <= 1; dx++) {
+        for (let dy = -1; dy <= 1; dy++) {
+          for (let dz = -1; dz <= 1; dz++) {
+            const neighborKey = `${cx + dx},${cy + dy},${cz + dz}`
+            const cellPoints = spatialHash.get(neighborKey)
+            if (cellPoints) {
+              for (const j of cellPoints) {
+                if (i !== j) {
+                  const dist = pos.distanceTo(starPositions[j])
+                  if (dist <= maxBondDist) {
+                    candidates.push({ idx: j, dist })
+                  }
+                }
+              }
+            }
+          }
+        }
+      }
+      
+      // Sort candidates and take up to 12 nearest
+      candidates.sort((a, b) => a.dist - b.dist)
+      const neighbors = candidates.slice(0, 12)
+      
+      for (const neighbor of neighbors) {
+        const bondKey = i < neighbor.idx ? `${i}-${neighbor.idx}` : `${neighbor.idx}-${i}`
+        if (!addedBonds.has(bondKey)) {
+          addedBonds.add(bondKey)
+          bonds.push({ start: pos, end: starPositions[neighbor.idx] })
+        }
+      }
+    }
+    
+    if (bonds.length === 0) {
+      bondsRef.current = null
+      return
+    }
+    
+    // Bond radius: 10% of star diameter, scaled by bondDensity
+    const maxStarSize = sphereRadius * 0.9
+    const starSize = Math.max(0.01, starDensity * maxStarSize)
+    const bondRadius = starSize * 0.1 * bondDensity
+    
+    // Create instanced cylinders for all bonds in ONE draw call
+    const bondGeo = new THREE.CylinderGeometry(bondRadius, bondRadius, 1, 8, 1)
+    bondGeo.rotateX(Math.PI / 2)
+    
+    const instancedBonds = new THREE.InstancedMesh(
+      bondGeo,
+      materialController.getMaterial(),
+      bonds.length
+    )
+    instancedBonds.name = 'ATOM_BONDS_INSTANCED'
+    
+    const matrix = new THREE.Matrix4()
+    const position = new THREE.Vector3()
+    const quaternion = new THREE.Quaternion()
+    const scale = new THREE.Vector3()
+    const up = new THREE.Vector3(0, 0, 1)
+    
+    for (let i = 0; i < bonds.length; i++) {
+      const { start, end } = bonds[i]
+      position.lerpVectors(start, end, 0.5)
+      
+      const direction = new THREE.Vector3().subVectors(end, start)
+      const length = direction.length()
+      direction.normalize()
+      
+      quaternion.setFromUnitVectors(up, direction)
+      scale.set(1, 1, length)
+      
+      matrix.compose(position, quaternion, scale)
+      instancedBonds.setMatrixAt(i, matrix)
+    }
+    
+    instancedBonds.instanceMatrix.needsUpdate = true
+    scene.add(instancedBonds)
+    bondsRef.current = instancedBonds
+    
+    console.info(`[Bonds] Rendered ${bonds.length} bonds (spatial hash: ${spatialHash.size} cells)`)
+    
+  }, [bondDensity, starScale, starDensity, cosmicScale, galaxySize, initialized, scene])
 
   // Corner spheres effect
   useEffect(() => {
@@ -457,7 +805,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     const sphereGroup = new THREE.Group()
     sphereGroup.name = 'PATH_CORNER_SPHERES'
     
-    const sphereGeo = new THREE.SphereGeometry(sphereRadius, 32, 24)
+    const sphereGeo = new THREE.SphereGeometry(sphereRadius, 16, 12)
     
     pathCorners.forEach(pos => {
       const sphere = new THREE.Mesh(sphereGeo, materialController.getMaterial())
@@ -590,6 +938,23 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
 
   useFrame(() => {
     if (controlsRef.current) controlsRef.current.update()
+    
+    // Animate camera to target viewpoint
+    if (targetCameraPos.current && targetCameraLookAt.current) {
+      const lerpFactor = 0.05
+      camera.position.lerp(targetCameraPos.current, lerpFactor)
+      
+      // Update orbit controls target for smooth look-at
+      if (controlsRef.current) {
+        controlsRef.current.target.lerp(targetCameraLookAt.current, lerpFactor)
+      }
+      
+      // Clear target when close enough
+      if (camera.position.distanceTo(targetCameraPos.current) < 0.1) {
+        targetCameraPos.current = null
+        targetCameraLookAt.current = null
+      }
+    }
   })
 
   const config = cameraController.getConfig()
@@ -771,11 +1136,27 @@ export function AppLanding() {
   const [sphereRadius, setSphereRadius] = useState(0)
   const [starDensity, setStarDensity] = useState(0)
   const [cosmicScale, setCosmicScale] = useState(0)
+  const [bondDensity, setBondDensity] = useState(0)
+  const [starScale, setStarScale] = useState(0.1)
+  const [galaxySize, setGalaxySize] = useState(4)
+  const [cameraViewpoint, setCameraViewpoint] = useState(-1)
+  const [cameraViewpoints, setCameraViewpoints] = useState<CameraViewpoint[]>([])
+  const [lensLength, setLensLength] = useState(50) // mm equivalent
+  const [webgpuSupported, setWebgpuSupported] = useState<boolean | null>(null)
+  const [rendererInfo, setRendererInfo] = useState<{ vendor: string; renderer: string; webglVersion: string } | null>(null)
   const [debugMode] = useState(true)
+  
+  // Convert lens mm to FOV: fov = 2 * atan(36 / (2 * lens_mm)) * (180/PI)
+  const cameraFov = 2 * Math.atan(36 / (2 * lensLength)) * (180 / Math.PI)
 
   useEffect(() => {
     const unsubscribe = modeController.subscribe(setMode)
     return unsubscribe
+  }, [])
+  
+  // Check WebGPU support on mount
+  useEffect(() => {
+    isWebGPUSupported().then(setWebgpuSupported)
   }, [])
 
   const handleSculptureLoaded = useCallback(() => {
@@ -807,16 +1188,22 @@ export function AppLanding() {
   return (
     <div style={styles.container}>
       <Canvas
-        camera={{ position: [20, 15, 20], fov: 40 }}
+        camera={{ position: [20, 15, 20], fov: cameraFov, near: 0.5, far: 500 }}
         gl={{ 
           antialias: true, 
           toneMapping: THREE.ACESFilmicToneMapping,
           toneMappingExposure: 1.0,
+          powerPreference: 'high-performance',
         }}
         style={{ background: '#0a0a0a' }}
+        onCreated={({ gl }: { gl: THREE.WebGLRenderer }) => {
+          const info = getRendererInfo(gl)
+          setRendererInfo(info)
+          console.info(`[Renderer] ${info.webglVersion} - ${info.renderer}`)
+        }}
       >
         {debugMode ? (
-          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} />
+          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} onCameraViewpointsComputed={setCameraViewpoints} />
         ) : (
           <SculptureScene onSculptureLoaded={handleSculptureLoaded} />
         )}
@@ -826,10 +1213,21 @@ export function AppLanding() {
         <div style={styles.debugPanel}>
           <h3 style={{ margin: '0 0 16px 0', color: '#fff' }}>Debug Controls</h3>
           
+          {rendererInfo && (
+            <div style={{ marginBottom: '16px', padding: '8px', background: '#1a1a1a', borderRadius: '4px', fontSize: '13px' }}>
+              <div style={{ color: '#4a9eff', marginBottom: '4px' }}>
+                {rendererInfo.webglVersion} {webgpuSupported ? '• WebGPU Ready' : ''}
+              </div>
+              <div style={{ color: '#888', fontSize: '12px', wordBreak: 'break-word' }}>
+                {rendererInfo.renderer}
+              </div>
+            </div>
+          )}
+          
           <div style={{ marginBottom: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '13px', marginBottom: '8px' }}>Scale to Heartline</div>
+            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Scale to Heartline</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '12px' }}>Full</span>
+              <span style={{ color: '#888', fontSize: '15px' }}>Full</span>
               <input
                 type="range"
                 min={0}
@@ -839,17 +1237,17 @@ export function AppLanding() {
                 onChange={(e) => setLoftProgress(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '12px' }}>Core</span>
+              <span style={{ color: '#888', fontSize: '15px' }}>Core</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '13px' }}>
+            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
               Scale: <strong>{((1.0 - loftProgress * 0.975) * 100).toFixed(1)}%</strong>
             </div>
           </div>
           
           <div style={{ marginBottom: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '13px', marginBottom: '8px' }}>Straighten to Polyline</div>
+            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Straighten to Polyline</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '12px' }}>Curve</span>
+              <span style={{ color: '#888', fontSize: '15px' }}>Curve</span>
               <input
                 type="range"
                 min={0}
@@ -859,17 +1257,17 @@ export function AppLanding() {
                 onChange={(e) => setStraighten(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '12px' }}>Stick</span>
+              <span style={{ color: '#888', fontSize: '15px' }}>Stick</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '13px' }}>
+            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
               Straighten: <strong>{(straighten * 100).toFixed(0)}%</strong>
             </div>
           </div>
           
           <div style={{ marginBottom: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '13px', marginBottom: '8px' }}>Corner Spheres</div>
+            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Corner Spheres</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '12px' }}>Off</span>
+              <span style={{ color: '#888', fontSize: '15px' }}>Off</span>
               <input
                 type="range"
                 min={0}
@@ -879,17 +1277,17 @@ export function AppLanding() {
                 onChange={(e) => setSphereRadius(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '12px' }}>Large</span>
+              <span style={{ color: '#888', fontSize: '15px' }}>Large</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '13px' }}>
+            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
               Radius: <strong>{sphereRadius > 0 ? sphereRadius.toFixed(2) : 'Off'}</strong>
             </div>
           </div>
           
-          <div>
-            <div style={{ color: '#aaa', fontSize: '13px', marginBottom: '8px' }}>Galaxy Stars</div>
+          <div style={{ marginBottom: '16px' }}>
+            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Galaxy Stars</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '12px' }}>None</span>
+              <span style={{ color: '#888', fontSize: '15px' }}>None</span>
               <input
                 type="range"
                 min={0}
@@ -899,17 +1297,57 @@ export function AppLanding() {
                 onChange={(e) => setStarDensity(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '12px' }}>Max</span>
+              <span style={{ color: '#888', fontSize: '15px' }}>Max</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '13px' }}>
+            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
               Density: <strong>{(starDensity * 100).toFixed(0)}%</strong>
             </div>
           </div>
           
           <div style={{ marginBottom: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '13px', marginBottom: '8px' }}>Cosmic Scaler</div>
+            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Galaxy Size</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '12px' }}>Cosmic</span>
+              <span style={{ color: '#888', fontSize: '15px' }}>1x</span>
+              <input
+                type="range"
+                min={1}
+                max={10}
+                step={0.5}
+                value={galaxySize}
+                onChange={(e) => setGalaxySize(parseFloat(e.target.value))}
+                style={{ flex: 1 }}
+              />
+              <span style={{ color: '#888', fontSize: '15px' }}>10x</span>
+            </div>
+            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+              Size: <strong>{galaxySize.toFixed(1)}x</strong> radius
+            </div>
+          </div>
+          
+          <div style={{ marginBottom: '16px' }}>
+            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Star Scaler</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <span style={{ color: '#888', fontSize: '15px' }}>Tiny</span>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={starScale}
+                onChange={(e) => setStarScale(parseFloat(e.target.value))}
+                style={{ flex: 1 }}
+              />
+              <span style={{ color: '#888', fontSize: '15px' }}>Touch</span>
+            </div>
+            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+              Scale: <strong>{(starScale * 100).toFixed(0)}%</strong>
+            </div>
+          </div>
+          
+          <div style={{ marginBottom: '16px' }}>
+            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Cosmic Scaler</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <span style={{ color: '#888', fontSize: '15px' }}>Cosmic</span>
               <input
                 type="range"
                 min={0}
@@ -919,30 +1357,100 @@ export function AppLanding() {
                 onChange={(e) => setCosmicScale(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '12px' }}>Atomic</span>
+              <span style={{ color: '#888', fontSize: '15px' }}>Atomic</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '13px' }}>
+            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
               Lattice: <strong>{(cosmicScale * 100).toFixed(0)}%</strong>
             </div>
           </div>
           
-          <div>
-            <div style={{ color: '#aaa', fontSize: '13px', marginBottom: '8px' }}>Rotation Speed</div>
+          <div style={{ marginBottom: '16px' }}>
+            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Atom Bonds</div>
             <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '12px' }}>Slow</span>
+              <span style={{ color: '#888', fontSize: '15px' }}>None</span>
+              <input
+                type="range"
+                min={0}
+                max={1}
+                step={0.01}
+                value={bondDensity}
+                onChange={(e) => setBondDensity(parseFloat(e.target.value))}
+                style={{ flex: 1 }}
+              />
+              <span style={{ color: '#888', fontSize: '15px' }}>Full</span>
+            </div>
+            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+              Bonds: <strong>{bondDensity > 0 ? `${(bondDensity * 100).toFixed(0)}%` : 'Off'}</strong>
+            </div>
+          </div>
+          
+          <div>
+            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Rotation Speed</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <span style={{ color: '#888', fontSize: '15px' }}>Slow</span>
               <input
                 type="range"
                 min={0}
                 max={1.25}
-                step={0.025}
+                step={0.005}
                 value={rotateSpeed}
                 onChange={(e) => setRotateSpeed(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '12px' }}>Fast</span>
+              <span style={{ color: '#888', fontSize: '15px' }}>Fast</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '13px' }}>
-              Speed: <strong>{rotateSpeed.toFixed(1)}</strong>
+            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+              Speed: <strong>{rotateSpeed.toFixed(3)}</strong>
+            </div>
+          </div>
+          
+          {cameraViewpoints.length > 0 && (
+            <div style={{ marginTop: '16px' }}>
+              <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Camera Viewpoint</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+                <span style={{ color: '#888', fontSize: '15px' }}>Free</span>
+                <input
+                  type="range"
+                  min={-1}
+                  max={cameraViewpoints.length - 1}
+                  step={1}
+                  value={cameraViewpoint}
+                  onChange={(e) => setCameraViewpoint(parseInt(e.target.value))}
+                  style={{ flex: 1 }}
+                />
+                <span style={{ color: '#888', fontSize: '15px' }}>{cameraViewpoints.length}</span>
+              </div>
+              <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+                {cameraViewpoint < 0 ? (
+                  <span>Mode: <strong>Free Camera</strong></span>
+                ) : (
+                  <span>
+                    <strong>{cameraViewpoints[cameraViewpoint]?.label}</strong>
+                    <span style={{ color: '#888', marginLeft: '8px' }}>({cameraViewpoints[cameraViewpoint]?.type})</span>
+                  </span>
+                )}
+              </div>
+            </div>
+          )}
+          
+          <div style={{ marginTop: '16px' }}>
+            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Camera Lens</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
+              <span style={{ color: '#888', fontSize: '15px' }}>20mm</span>
+              <input
+                type="range"
+                min={20}
+                max={300}
+                step={5}
+                value={lensLength}
+                onChange={(e) => setLensLength(parseFloat(e.target.value))}
+                style={{ flex: 1 }}
+              />
+              <span style={{ color: '#888', fontSize: '15px' }}>300mm</span>
+            </div>
+            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+              Lens: <strong>{lensLength}mm</strong>
+              <span style={{ color: '#888', marginLeft: '8px' }}>(FOV {cameraFov.toFixed(1)}°)</span>
             </div>
           </div>
         </div>
@@ -1074,7 +1582,7 @@ const styles: Record<string, React.CSSProperties> = {
     background: 'rgba(0,0,0,0.85)',
     padding: '16px 20px',
     borderRadius: '10px',
-    minWidth: '280px',
+    minWidth: '560px',
     fontFamily: 'sans-serif',
   },
 }

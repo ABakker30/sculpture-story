@@ -9,6 +9,7 @@ export interface HDREnvironment {
 export interface LightingConfig {
   environmentIntensity: number
   showBackground: boolean
+  ambientIntensity: number
   keyLightIntensity: number
   keyLightAzimuth: number
   keyLightElevation: number
@@ -18,14 +19,15 @@ export interface LightingConfig {
 }
 
 const DEFAULT_CONFIG: LightingConfig = {
-  environmentIntensity: 1.0,
+  environmentIntensity: 0.5,
   showBackground: false,
-  keyLightIntensity: 1.5,
+  ambientIntensity: 0.2,
+  keyLightIntensity: 1.0,
   keyLightAzimuth: 45,
   keyLightElevation: 45,
-  fillLightIntensity: 0.5,
+  fillLightIntensity: 0.3,
   rimLightEnabled: true,
-  rimLightIntensity: 0.8,
+  rimLightIntensity: 0.5,
 }
 
 const BUILT_IN_ENVIRONMENTS: HDREnvironment[] = [
@@ -85,7 +87,7 @@ class LightingController {
     this.rimLight.visible = this.config.rimLightEnabled
     this.scene.add(this.rimLight)
 
-    this.ambientLight = new THREE.AmbientLight(0x404040, 0.3)
+    this.ambientLight = new THREE.AmbientLight(0x404040, this.config.ambientIntensity)
     this.ambientLight.name = 'AMBIENT_LIGHT'
     this.scene.add(this.ambientLight)
 
@@ -219,6 +221,13 @@ class LightingController {
     this.config.rimLightIntensity = intensity
     if (this.rimLight) {
       this.rimLight.intensity = intensity
+    }
+  }
+
+  setAmbientIntensity(intensity: number): void {
+    this.config.ambientIntensity = intensity
+    if (this.ambientLight) {
+      this.ambientLight.intensity = intensity
     }
   }
 

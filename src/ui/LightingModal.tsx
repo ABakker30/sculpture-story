@@ -62,6 +62,9 @@ export function LightingModal({ isOpen, onClose }: LightingModalProps) {
       case 'showBackground':
         lightingController.setShowBackground(value as boolean)
         break
+      case 'ambientIntensity':
+        lightingController.setAmbientIntensity(value as number)
+        break
       case 'keyLightIntensity':
         lightingController.setKeyLightIntensity(value as number)
         break
@@ -112,8 +115,14 @@ export function LightingModal({ isOpen, onClose }: LightingModalProps) {
             <SliderRow
               label="Environment Intensity"
               value={config.environmentIntensity}
-              min={0} max={3} step={0.1}
+              min={0} max={5} step={0.1}
               onChange={(v) => handleConfigChange('environmentIntensity', v)}
+            />
+            <SliderRow
+              label="Ambient Light"
+              value={config.ambientIntensity}
+              min={0} max={3} step={0.1}
+              onChange={(v) => handleConfigChange('ambientIntensity', v)}
             />
             <CheckboxRow
               label="Show Background"
@@ -126,7 +135,7 @@ export function LightingModal({ isOpen, onClose }: LightingModalProps) {
             <SliderRow
               label="Intensity"
               value={config.keyLightIntensity}
-              min={0} max={5} step={0.1}
+              min={0} max={10} step={0.1}
               onChange={(v) => handleConfigChange('keyLightIntensity', v)}
             />
             <SliderRow
@@ -147,7 +156,7 @@ export function LightingModal({ isOpen, onClose }: LightingModalProps) {
             <SliderRow
               label="Intensity"
               value={config.fillLightIntensity}
-              min={0} max={2} step={0.1}
+              min={0} max={5} step={0.1}
               onChange={(v) => handleConfigChange('fillLightIntensity', v)}
             />
           </Section>
@@ -161,7 +170,7 @@ export function LightingModal({ isOpen, onClose }: LightingModalProps) {
             <SliderRow
               label="Intensity"
               value={config.rimLightIntensity}
-              min={0} max={2} step={0.1}
+              min={0} max={5} step={0.1}
               onChange={(v) => handleConfigChange('rimLightIntensity', v)}
               disabled={!config.rimLightEnabled}
             />
