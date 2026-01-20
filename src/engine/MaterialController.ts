@@ -1,4 +1,14 @@
 import * as THREE from 'three'
+import JSZip from 'jszip'
+
+export interface PBRTextures {
+  map?: THREE.Texture | null
+  normalMap?: THREE.Texture | null
+  roughnessMap?: THREE.Texture | null
+  metalnessMap?: THREE.Texture | null
+  aoMap?: THREE.Texture | null
+  displacementMap?: THREE.Texture | null
+}
 
 export interface MaterialConfig {
   color: string
@@ -241,6 +251,140 @@ class MaterialController {
 
   dispose(): void {
     this.material.dispose()
+  }
+
+  async loadPBRFromZip(zipUrl: string): Promise<void> {
+    console.info(`[MaterialController] Loading PBR from: ${zipUrl}`)
+    
+    try {
+      const response = await fetch(zipUrl)
+      if (!response.ok) throw new Error(`Failed to fetch ${zipUrl}`)
+      
+      const arrayBuffer = await response.arrayBuffer()
+      const zip = await JSZip.loadAsync(arrayBuffer)
+      
+      const textureLoader = new THREE.TextureLoader()
+      const textures: PBRTextures = {}
+      
+      // Map common PBR texture name patterns to material properties
+      // Order matters - more specific patterns first to avoid false matches
+      const texturePatterns: Array<{ patterns: string[], key: keyof PBRTextures, encoding?: THREE.ColorSpace }> = [
+        { patterns: ['_color_', '_color.', 'basecolor', 'base_color', 'diffuse', 'albedo', '_col_', '_col.'], key: 'map', encoding: THREE.SRGBColorSpace },
+        { patterns: ['_normal', '_nrm', 'normalgl', 'normaldx', '_nor_', '_nor.'], key: 'normalMap', encoding: THREE.LinearSRGBColorSpace },
+        { patterns: ['_roughness', '_rough', '_rgh'], key: 'roughnessMap', encoding: THREE.LinearSRGBColorSpace },
+        { patterns: ['_metallic', '_metalness', '_metal', '_mtl'], key: 'metalnessMap', encoding: THREE.LinearSRGBColorSpace },
+        { patterns: ['_ao_', '_ao.', '_ambientocclusion', '_occlusion'], key: 'aoMap', encoding: THREE.LinearSRGBColorSpace },
+        { patterns: ['_disp_', '_disp.', '_displacement', '_height'], key: 'displacementMap', encoding: THREE.LinearSRGBColorSpace },
+      ]
+      
+      // Process each file in the zip
+      const files = Object.keys(zip.files)
+      console.info(`[MaterialController] Found ${files.length} files in zip:`, files)
+      
+      for (const filename of files) {
+        const file = zip.files[filename]
+        if (file.dir) continue
+        
+        const lowerName = filename.toLowerCase()
+        if (!lowerName.endsWith('.jpg') && !lowerName.endsWith('.jpeg') && !lowerName.endsWith('.png') && !lowerName.endsWith('.tif') && !lowerName.endsWith('.tiff')) {
+          continue
+        }
+        
+        // Find which texture type this file matches
+        let matched = false
+        for (const { patterns, key, encoding } of texturePatterns) {
+          const matches = patterns.some(p => lowerName.includes(p))
+          if (matches && !textures[key]) {
+            matched = true
+            try {
+              const blob = await file.async('blob')
+              const url = URL.createObjectURL(blob)
+              const texture = await new Promise<THREE.Texture>((resolve, reject) => {
+                textureLoader.load(url, resolve, undefined, reject)
+              })
+              texture.colorSpace = encoding || THREE.LinearSRGBColorSpace
+              texture.wrapS = THREE.RepeatWrapping
+              texture.wrapT = THREE.RepeatWrapping
+              textures[key] = texture
+              console.info(`[MaterialController] Loaded ${key} from ${filename}`)
+            } catch (err) {
+              console.warn(`[MaterialController] Failed to load ${filename}:`, err)
+            }
+            break
+          }
+        }
+        if (!matched) {
+          console.info(`[MaterialController] Unmatched texture file: ${filename}`)
+        }
+      }
+      
+      // Apply textures to material
+      this.applyPBRTextures(textures)
+      console.info('[MaterialController] PBR textures applied')
+      
+    } catch (error) {
+      console.error('[MaterialController] Failed to load PBR zip:', error)
+      throw error
+    }
+  }
+
+  applyPBRTextures(textures: PBRTextures): void {
+    // Clear existing textures
+    this.clearPBRTextures()
+    
+    if (textures.map) {
+      this.material.map = textures.map
+      this.material.color.set('#ffffff') // Use white base color when texture is present
+    }
+    if (textures.normalMap) {
+      this.material.normalMap = textures.normalMap
+      this.material.normalScale = new THREE.Vector2(1, 1)
+    }
+    if (textures.roughnessMap) {
+      this.material.roughnessMap = textures.roughnessMap
+      this.material.roughness = 1.0 // Let the map control roughness
+    }
+    if (textures.metalnessMap) {
+      this.material.metalnessMap = textures.metalnessMap
+      this.material.metalness = 1.0 // Let the map control metalness
+    }
+    if (textures.aoMap) {
+      this.material.aoMap = textures.aoMap
+      this.material.aoMapIntensity = 1.0
+    }
+    if (textures.displacementMap) {
+      this.material.displacementMap = textures.displacementMap
+      this.material.displacementScale = 0.1
+    }
+    
+    this.material.needsUpdate = true
+  }
+
+  clearPBRTextures(): void {
+    if (this.material.map) { this.material.map.dispose(); this.material.map = null }
+    if (this.material.normalMap) { this.material.normalMap.dispose(); this.material.normalMap = null }
+    if (this.material.roughnessMap) { this.material.roughnessMap.dispose(); this.material.roughnessMap = null }
+    if (this.material.metalnessMap) { this.material.metalnessMap.dispose(); this.material.metalnessMap = null }
+    if (this.material.aoMap) { this.material.aoMap.dispose(); this.material.aoMap = null }
+    if (this.material.displacementMap) { this.material.displacementMap.dispose(); this.material.displacementMap = null }
+    
+    this.material.needsUpdate = true
+  }
+
+  hasPBRTextures(): boolean {
+    return !!(this.material.map || this.material.normalMap || this.material.roughnessMap || 
+              this.material.metalnessMap || this.material.aoMap || this.material.displacementMap)
+  }
+
+  getActiveTextures(): string[] {
+    const active: string[] = []
+    if (this.material.map) active.push('Color')
+    if (this.material.normalMap) active.push('Normal')
+    if (this.material.roughnessMap) active.push('Roughness')
+    if (this.material.metalnessMap) active.push('Metalness')
+    if (this.material.aoMap) active.push('AO')
+    if (this.material.displacementMap) active.push('Displacement')
+    return active
   }
 }
 

@@ -24,3 +24,9 @@ Thumbs.db
 .env
 .env.local
 .env.*.local
+
+# Local Netlify folder
+.netlify
+
+# Large PBR texture files (use external hosting)
+public/PBR/*.zip

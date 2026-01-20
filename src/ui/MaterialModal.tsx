@@ -6,18 +6,82 @@ interface MaterialModalProps {
   onClose: () => void
 }
 
+interface PBRFile {
+  name: string
+  path: string
+}
+
+type TabType = 'properties' | 'pbr'
+
 export function MaterialModal({ isOpen, onClose }: MaterialModalProps) {
   const [config, setConfig] = useState<MaterialConfig>(materialController.getConfig())
   const [presets] = useState<string[]>(materialController.getPresetNames())
   const [position, setPosition] = useState({ x: 400, y: 80 })
   const [isDragging, setIsDragging] = useState(false)
   const dragOffset = useRef({ x: 0, y: 0 })
+  const [activeTab, setActiveTab] = useState<TabType>('properties')
+  const [pbrFiles, setPbrFiles] = useState<PBRFile[]>([])
+  const [loadingPBR, setLoadingPBR] = useState(false)
+  const [activePBR, setActivePBR] = useState<string | null>(null)
+  const [activeTextures, setActiveTextures] = useState<string[]>([])
 
   useEffect(() => {
     if (isOpen) {
       setConfig(materialController.getConfig())
+      setActiveTextures(materialController.getActiveTextures())
+      // Fetch PBR files list
+      fetchPBRFiles()
     }
   }, [isOpen])
+
+  const fetchPBRFiles = async () => {
+    try {
+      // Fetch the directory listing from a manifest file or use a known list
+      // For now, we'll fetch a manifest.json that lists available PBR zips
+      const response = await fetch('/PBR/manifest.json')
+      if (response.ok) {
+        const files: string[] = await response.json()
+        setPbrFiles(files.map(f => ({ name: f.replace('.zip', ''), path: `/PBR/${f}` })))
+      }
+    } catch {
+      // If no manifest, try to use a hardcoded list or leave empty
+      console.info('[MaterialModal] No PBR manifest found, scanning known files')
+      // Fallback: try known files
+      const knownFiles = ['FabricTarpPlastic001.zip']
+      const validFiles: PBRFile[] = []
+      for (const file of knownFiles) {
+        try {
+          const resp = await fetch(`/PBR/${file}`, { method: 'HEAD' })
+          if (resp.ok) {
+            validFiles.push({ name: file.replace('.zip', ''), path: `/PBR/${file}` })
+          }
+        } catch { /* ignore */ }
+      }
+      setPbrFiles(validFiles)
+    }
+  }
+
+  const handleLoadPBR = async (pbrFile: PBRFile) => {
+    setLoadingPBR(true)
+    try {
+      await materialController.loadPBRFromZip(pbrFile.path)
+      setActivePBR(pbrFile.name)
+      setConfig(materialController.getConfig())
+      setActiveTextures(materialController.getActiveTextures())
+    } catch (error) {
+      console.error('Failed to load PBR:', error)
+      alert(`Failed to load PBR material: ${error}`)
+    } finally {
+      setLoadingPBR(false)
+    }
+  }
+
+  const handleClearPBR = () => {
+    materialController.clearPBRTextures()
+    setActivePBR(null)
+    setConfig(materialController.getConfig())
+    setActiveTextures([])
+  }
 
   useEffect(() => {
     if (!isDragging) return
@@ -111,7 +175,34 @@ export function MaterialModal({ isOpen, onClose }: MaterialModalProps) {
         <button style={styles.closeButton} onClick={onClose}>×</button>
       </div>
 
+      <div style={styles.tabs}>
+        <button
+          style={{ ...styles.tab, ...(activeTab === 'properties' ? styles.tabActive : {}) }}
+          onClick={() => setActiveTab('properties')}
+        >
+          Properties
+        </button>
+        <button
+          style={{ ...styles.tab, ...(activeTab === 'pbr' ? styles.tabActive : {}) }}
+          onClick={() => setActiveTab('pbr')}
+        >
+          PBR Textures
+        </button>
+      </div>
+
+      {activeTab === 'properties' && (
         <div style={styles.content}>
+          {activeTextures.length > 0 && (
+            <div style={styles.pbrWarning}>
+              <strong>PBR Textures Active</strong>
+              <div style={styles.pbrWarningText}>
+                The following properties are controlled by textures: {activeTextures.join(', ')}
+              </div>
+              <button style={styles.clearPbrSmall} onClick={handleClearPBR}>
+                Clear Textures
+              </button>
+            </div>
+          )}
           <Section title="Presets">
             <div style={styles.presetGrid}>
               {presets.map((preset) => (
@@ -204,6 +295,68 @@ export function MaterialModal({ isOpen, onClose }: MaterialModalProps) {
             </div>
           </div>
         </div>
+      )}
+
+      {activeTab === 'pbr' && (
+        <div style={styles.content}>
+          <Section title="PBR Materials">
+            {loadingPBR && (
+              <div style={styles.loadingOverlay}>
+                <div style={styles.spinner} />
+                <span>Loading PBR textures...</span>
+              </div>
+            )}
+            
+            {activePBR && (
+              <div style={styles.activePBR}>
+                <span>Active: <strong>{activePBR}</strong></span>
+                <button style={styles.clearButton} onClick={handleClearPBR}>
+                  Clear Textures
+                </button>
+              </div>
+            )}
+            
+            <div style={styles.pbrGrid}>
+              {pbrFiles.length === 0 ? (
+                <div style={styles.emptyMessage}>
+                  No PBR materials found in /PBR folder.
+                  <br /><br />
+                  Add .zip files containing PBR textures to the public/PBR directory.
+                </div>
+              ) : (
+                pbrFiles.map((file) => (
+                  <button
+                    key={file.path}
+                    style={{
+                      ...styles.pbrButton,
+                      ...(activePBR === file.name ? styles.pbrButtonActive : {})
+                    }}
+                    onClick={() => handleLoadPBR(file)}
+                    disabled={loadingPBR}
+                  >
+                    <div style={styles.pbrIcon}>🎨</div>
+                    <div style={styles.pbrName}>{file.name}</div>
+                  </button>
+                ))
+              )}
+            </div>
+          </Section>
+          
+          <Section title="Texture Info">
+            <div style={styles.textureInfo}>
+              <p>Supported texture maps:</p>
+              <ul style={styles.textureList}>
+                <li><strong>Base Color</strong> - albedo, diffuse, color</li>
+                <li><strong>Normal</strong> - normal map</li>
+                <li><strong>Roughness</strong> - surface roughness</li>
+                <li><strong>Metallic</strong> - metalness map</li>
+                <li><strong>AO</strong> - ambient occlusion</li>
+                <li><strong>Displacement</strong> - height map</li>
+              </ul>
+            </div>
+          </Section>
+        </div>
+      )}
     </div>
   )
 }
@@ -358,6 +511,133 @@ const styles: Record<string, React.CSSProperties> = {
     borderRadius: '6px',
     color: '#fff',
     fontSize: '14px',
+    cursor: 'pointer',
+  },
+  tabs: {
+    display: 'flex',
+    borderBottom: '1px solid #333',
+  },
+  tab: {
+    flex: 1,
+    padding: '12px 16px',
+    background: 'transparent',
+    border: 'none',
+    borderBottom: '2px solid transparent',
+    color: '#888',
+    fontSize: '14px',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+  },
+  tabActive: {
+    color: '#fff',
+    borderBottomColor: '#4a9eff',
+    background: 'rgba(74, 158, 255, 0.1)',
+  },
+  pbrGrid: {
+    display: 'grid',
+    gridTemplateColumns: 'repeat(2, 1fr)',
+    gap: '12px',
+  },
+  pbrButton: {
+    padding: '16px',
+    background: '#2a2a2a',
+    border: '1px solid #444',
+    borderRadius: '8px',
+    color: '#ccc',
+    cursor: 'pointer',
+    transition: 'all 0.2s',
+    textAlign: 'center' as const,
+  },
+  pbrButtonActive: {
+    borderColor: '#4a9eff',
+    background: 'rgba(74, 158, 255, 0.15)',
+  },
+  pbrIcon: {
+    fontSize: '28px',
+    marginBottom: '8px',
+  },
+  pbrName: {
+    fontSize: '12px',
+    wordBreak: 'break-word' as const,
+  },
+  activePBR: {
+    display: 'flex',
+    justifyContent: 'space-between',
+    alignItems: 'center',
+    padding: '10px 14px',
+    background: 'rgba(74, 158, 255, 0.1)',
+    borderRadius: '6px',
+    marginBottom: '14px',
+    color: '#ccc',
+    fontSize: '14px',
+  },
+  clearButton: {
+    padding: '6px 12px',
+    background: '#553333',
+    border: '1px solid #774444',
+    borderRadius: '4px',
+    color: '#fff',
+    fontSize: '12px',
+    cursor: 'pointer',
+  },
+  loadingOverlay: {
+    display: 'flex',
+    alignItems: 'center',
+    gap: '12px',
+    padding: '14px',
+    background: 'rgba(0,0,0,0.3)',
+    borderRadius: '6px',
+    marginBottom: '14px',
+    color: '#aaa',
+    fontSize: '14px',
+  },
+  spinner: {
+    width: '20px',
+    height: '20px',
+    border: '2px solid #444',
+    borderTopColor: '#4a9eff',
+    borderRadius: '50%',
+    animation: 'spin 1s linear infinite',
+  },
+  emptyMessage: {
+    gridColumn: '1 / -1',
+    padding: '24px',
+    textAlign: 'center' as const,
+    color: '#666',
+    fontSize: '14px',
+    lineHeight: 1.5,
+  },
+  textureInfo: {
+    color: '#888',
+    fontSize: '13px',
+    lineHeight: 1.6,
+  },
+  textureList: {
+    margin: '10px 0 0 0',
+    paddingLeft: '20px',
+  },
+  pbrWarning: {
+    padding: '12px 14px',
+    background: 'rgba(255, 170, 50, 0.15)',
+    border: '1px solid rgba(255, 170, 50, 0.4)',
+    borderRadius: '6px',
+    marginBottom: '16px',
+    color: '#ffaa32',
+    fontSize: '13px',
+  },
+  pbrWarningText: {
+    marginTop: '6px',
+    color: '#ccc',
+    fontSize: '12px',
+  },
+  clearPbrSmall: {
+    marginTop: '10px',
+    padding: '6px 12px',
+    background: '#553333',
+    border: '1px solid #774444',
+    borderRadius: '4px',
+    color: '#fff',
+    fontSize: '12px',
     cursor: 'pointer',
   },
 }

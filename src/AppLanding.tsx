@@ -16,6 +16,18 @@ import modeController, { AppMode } from './engine/ModeController'
 
 import LightingModal from './ui/LightingModal'
 import MaterialModal from './ui/MaterialModal'
+import CameraAnimationModal, { CameraAnimationSettings } from './ui/CameraAnimationModal'
+
+interface SmoothCameraAnimation {
+  isActive: boolean
+  curve: THREE.CatmullRomCurve3 | null
+  targetCurve: THREE.CatmullRomCurve3 | null
+  startTime: number
+  duration: number
+  lookAhead: number
+  loop: boolean
+  easing: 'linear' | 'easeIn' | 'easeOut' | 'easeInOut'
+}
 
 interface DebugSceneProps {
   loftProgress: number
@@ -33,6 +45,8 @@ interface DebugSceneProps {
   cameraFov: number
   useGpu: boolean
   onCameraViewpointsComputed: (viewpoints: CameraViewpoint[]) => void
+  smoothCameraAnim: SmoothCameraAnimation | null
+  onSmoothAnimComplete?: () => void
 }
 
 // Detect lattice type from corner distances and angles
@@ -154,12 +168,11 @@ function generateLatticePoints(
   // Use first corner as lattice origin
   const origin = corners.length > 0 ? corners[0].clone() : center.clone()
   
-  console.group('[Lattice Generation - Using Segment Vectors as Basis]')
-  console.info(`Origin (corner 0): (${origin.x.toFixed(3)}, ${origin.y.toFixed(3)}, ${origin.z.toFixed(3)})`)
+  console.group(`[Lattice Generation - ${_type}]`)
+  console.info(`Origin: (${origin.x.toFixed(3)}, ${origin.y.toFixed(3)}, ${origin.z.toFixed(3)})`)
   console.info(`Lattice constant: ${latticeConstant.toFixed(3)}`)
   
   // Find 3 linearly independent segment vectors from the path
-  // These will be our lattice basis vectors (non-orthogonal)
   const basisVectors: THREE.Vector3[] = []
   const usedDirections: THREE.Vector3[] = []
   
@@ -167,22 +180,19 @@ function generateLatticePoints(
     const seg = new THREE.Vector3().subVectors(corners[i + 1], corners[i])
     const segNorm = seg.clone().normalize()
     
-    // Check if this direction is linearly independent from existing basis vectors
     let isIndependent = true
     for (const existing of usedDirections) {
       const dot = Math.abs(segNorm.dot(existing))
-      if (dot > 0.99) { // Nearly parallel
+      if (dot > 0.99) {
         isIndependent = false
         break
       }
     }
     
     if (isIndependent) {
-      // Normalize to lattice constant (the segment should be integer * latticeConstant)
       const unitVec = segNorm.multiplyScalar(latticeConstant)
       basisVectors.push(unitVec)
       usedDirections.push(segNorm.clone().normalize())
-      console.info(`Basis ${basisVectors.length}: segment ${i}→${i+1}, direction=(${segNorm.x.toFixed(3)}, ${segNorm.y.toFixed(3)}, ${segNorm.z.toFixed(3)})`)
     }
   }
   
@@ -204,43 +214,16 @@ function generateLatticePoints(
       if (isIndependent) {
         basisVectors.push(cand.clone().multiplyScalar(latticeConstant))
         usedDirections.push(cand.clone())
-        console.info(`Basis ${basisVectors.length}: added orthogonal fallback`)
         break
       }
     }
   }
   
   const [b1, b2, b3] = basisVectors
-  console.info(`Basis 1: (${b1.x.toFixed(3)}, ${b1.y.toFixed(3)}, ${b1.z.toFixed(3)})`)
-  console.info(`Basis 2: (${b2.x.toFixed(3)}, ${b2.y.toFixed(3)}, ${b2.z.toFixed(3)})`)
-  console.info(`Basis 3: (${b3.x.toFixed(3)}, ${b3.y.toFixed(3)}, ${b3.z.toFixed(3)})`)
   
-  // Verify all corners can be expressed as integer combinations of basis vectors
-  console.group('Corner Verification (should all be integers)')
-  
-  // Build matrix to solve for lattice coordinates: M * [i,j,k]^T = relPos
-  // We need to invert the basis matrix
-  const m = new THREE.Matrix3().set(
-    b1.x, b2.x, b3.x,
-    b1.y, b2.y, b3.y,
-    b1.z, b2.z, b3.z
-  )
-  const mInv = m.clone().invert()
-  
-  let allAligned = true
-  for (let idx = 0; idx < corners.length; idx++) {
-    const relPos = new THREE.Vector3().subVectors(corners[idx], origin)
-    const coords = relPos.clone().applyMatrix3(mInv)
-    const isInt = (v: number) => Math.abs(v - Math.round(v)) < 0.05
-    const aligned = isInt(coords.x) && isInt(coords.y) && isInt(coords.z)
-    if (!aligned) allAligned = false
-    console.info(`Corner ${idx}: lattice=(${coords.x.toFixed(2)}, ${coords.y.toFixed(2)}, ${coords.z.toFixed(2)}) ${aligned ? '✓' : '✗'}`)
-  }
-  console.info(`All corners aligned: ${allAligned ? 'YES ✓' : 'NO ✗'}`)
-  console.groupEnd()
-  
-  // Generate lattice points using the basis vectors
-  // Each basis vector is already scaled to latticeConstant, so we just use integer multiples
+  // Generate lattice points using path-derived basis vectors
+  // The basis vectors already encode the lattice structure from the path
+  // latticeConstant = nearest neighbor distance (not cubic cell edge)
   const halfExtent = Math.ceil(radius / latticeConstant) + 1
   
   for (let i = -halfExtent; i <= halfExtent; i++) {
@@ -258,13 +241,13 @@ function generateLatticePoints(
     }
   }
   
-  console.info(`[Lattice] Generated ${points.length} points using path-derived basis`)
+  console.info(`[Lattice] Generated ${points.length} ${_type} points`)
   console.groupEnd()
   
   return points
 }
 
-function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed }: DebugSceneProps) {
+function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed, smoothCameraAnim, onSmoothAnimComplete }: DebugSceneProps) {
   const { scene, gl, camera } = useThree()
   const meshRef = useRef<THREE.Mesh | null>(null)
   const crossSectionsRef = useRef<THREE.Group | null>(null)
@@ -501,10 +484,11 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     latticeConstantRef.current = latticeConstant
     
     // Generate lattice points based on galaxySize (1x-10x bounding sphere radius)
+    // Use sphere bounds first to get all potential lattice points
     const latticeRadius = boundingSphere.radius * galaxySize
     latticePointsRef.current = generateLatticePoints(boundingSphere.center, latticeRadius, latticeConstant, latticeType, pathCorners)
     
-    // Generate cosmic positions matching the galaxy size
+    // Generate cosmic positions in a sphere matching the galaxy size
     const cosmicRadius = boundingSphere.radius * galaxySize
     const numCosmicStars = Math.max(latticePointsRef.current.length, pathCorners.length * 50)
     const unsortedCosmicPositions = Array.from({ length: numCosmicStars }, () => {
@@ -554,7 +538,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     
     starPositionsRef.current = sortedCosmicPositions
     
-    console.info(`[Galaxy] Size ${galaxySize.toFixed(1)}x, lattice points: ${latticePointsRef.current.length}, cosmic stars: ${sortedCosmicPositions.length}`)
+    console.info(`[Galaxy] Size ${galaxySize.toFixed(1)}x, cubeoctahedron R=${cosmicRadius.toFixed(2)}, lattice: ${latticePointsRef.current.length}, cosmic: ${sortedCosmicPositions.length}`)
   }, [galaxySize, initialized])
 
   // Galaxy stars effect (using InstancedMesh for performance)
@@ -674,9 +658,10 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     }
     
     // SPATIAL HASHING: O(n) neighbor finding
-    // Cell size based on lattice constant (neighbors are ~1 cell away)
+    // latticeConstant = shortest segment = nearest neighbor distance
+    // Use 1.1x to capture neighbors with small tolerance, but not next shell
     const cellSize = latticeConstant * 1.5
-    const maxBondDist = latticeConstant * 1.8 // Only bond to points within this distance
+    const maxBondDist = latticeConstant * 1.1 // Nearest neighbors + small tolerance
     
     // Build spatial hash: Map<cellKey, pointIndices[]>
     const spatialHash = new Map<string, number[]>()
@@ -743,10 +728,11 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       return
     }
     
-    // Bond radius: 10% of star diameter, scaled by bondDensity
-    const maxStarSize = sphereRadius * 0.9
-    const starSize = Math.max(0.01, starDensity * maxStarSize)
-    const bondRadius = starSize * 0.1 * bondDensity
+    // Bond radius: up to 50% of star diameter, scaled by bondDensity
+    // Uses same star size calculation as stars effect (decoupled from corner spheres)
+    const maxStarRadius = latticeConstant * 0.5
+    const starSize = starScale * maxStarRadius
+    const bondRadius = starSize * 0.5 * bondDensity
     
     // Create instanced cylinders for all bonds in ONE draw call
     const bondGeo = new THREE.CylinderGeometry(bondRadius, bondRadius, 1, 8, 1)
@@ -944,7 +930,59 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   useFrame(() => {
     if (controlsRef.current) controlsRef.current.update()
     
-    // Animate camera to target viewpoint
+    // Smooth camera animation along curve
+    if (smoothCameraAnim?.isActive && smoothCameraAnim.curve && smoothCameraAnim.targetCurve) {
+      const elapsed = (Date.now() - smoothCameraAnim.startTime) / 1000
+      let rawT = elapsed / smoothCameraAnim.duration
+      
+      // Handle loop or completion
+      if (rawT >= 1) {
+        if (smoothCameraAnim.loop) {
+          rawT = rawT % 1
+        } else {
+          onSmoothAnimComplete?.()
+          return
+        }
+      }
+      
+      // Apply easing
+      let t = rawT
+      switch (smoothCameraAnim.easing) {
+        case 'easeIn':
+          t = rawT * rawT
+          break
+        case 'easeOut':
+          t = 1 - (1 - rawT) * (1 - rawT)
+          break
+        case 'easeInOut':
+          t = rawT < 0.5 ? 2 * rawT * rawT : 1 - Math.pow(-2 * rawT + 2, 2) / 2
+          break
+      }
+      
+      // Get position on curve
+      const pos = smoothCameraAnim.curve.getPointAt(t)
+      camera.position.copy(pos)
+      
+      // Get look target - blend between target curve and look-ahead on position curve
+      const lookAheadAmount = smoothCameraAnim.lookAhead / 100
+      if (lookAheadAmount > 0) {
+        const lookT = (t + lookAheadAmount * 0.1) % 1
+        const lookAheadPos = smoothCameraAnim.curve.getPointAt(lookT)
+        const targetPos = smoothCameraAnim.targetCurve.getPointAt(t)
+        const blendedTarget = new THREE.Vector3().lerpVectors(targetPos, lookAheadPos, lookAheadAmount)
+        if (controlsRef.current) {
+          controlsRef.current.target.copy(blendedTarget)
+        }
+      } else {
+        const targetPos = smoothCameraAnim.targetCurve.getPointAt(t)
+        if (controlsRef.current) {
+          controlsRef.current.target.copy(targetPos)
+        }
+      }
+      return
+    }
+    
+    // Animate camera to target viewpoint (stepped mode)
     if (targetCameraPos.current && targetCameraLookAt.current) {
       const lerpFactor = 0.05
       camera.position.lerp(targetCameraPos.current, lerpFactor)
@@ -981,16 +1019,22 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
 
 function createLoftGeometry(sections: THREE.Vector3[][]): THREE.BufferGeometry {
   const vps = sections[0].length
+  const numSections = sections.length
   const positions: number[] = []
   const indices: number[] = []
+  const uvs: number[] = []
   
-  for (const section of sections) {
-    for (const v of section) {
-      positions.push(v.x, v.y, v.z)
+  for (let s = 0; s < numSections; s++) {
+    const v = s / (numSections - 1)
+    for (let i = 0; i < vps; i++) {
+      const pt = sections[s][i]
+      positions.push(pt.x, pt.y, pt.z)
+      const u = i / (vps - 1)
+      uvs.push(u, v)
     }
   }
   
-  for (let s = 0; s < sections.length - 1; s++) {
+  for (let s = 0; s < numSections - 1; s++) {
     for (let i = 0; i < vps - 1; i++) {
       const c = s * vps + i
       indices.push(c, (s + 1) * vps + i, c + 1)
@@ -1004,6 +1048,7 @@ function createLoftGeometry(sections: THREE.Vector3[][]): THREE.BufferGeometry {
   
   const geo = new THREE.BufferGeometry()
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+  geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
   geo.setIndex(indices)
   return geo
 }
@@ -1113,6 +1158,19 @@ function LoadingIndicator() {
 export function AppLanding() {
   const [lightingModalOpen, setLightingModalOpen] = useState(false)
   const [materialModalOpen, setMaterialModalOpen] = useState(false)
+  const [cameraAnimModalOpen, setCameraAnimModalOpen] = useState(false)
+  const [_cameraAnimSettings, setCameraAnimSettings] = useState<CameraAnimationSettings>({
+    duration: 30,
+    viewpointTypes: { corner: true, edge: true, face: true },
+    lookAhead: 0,
+    easing: 'easeInOut',
+    mode: 'smooth',
+    loop: true,
+  })
+  const [cameraAnimPlaying, setCameraAnimPlaying] = useState(false)
+  const cameraAnimIntervalRef = useRef<number | null>(null)
+  const cameraAnimStateRef = useRef<{ filteredViewpoints: CameraViewpoint[], currentIndex: number, timePerViewpoint: number } | null>(null)
+  const [smoothCameraAnim, setSmoothCameraAnim] = useState<SmoothCameraAnimation | null>(null)
   const [autoRotate, setAutoRotate] = useState(false)
   const [rotateSpeed, setRotateSpeed] = useState(0.5)
   const [mode, setMode] = useState<AppMode>(modeController.getMode())
@@ -1159,6 +1217,91 @@ export function AppLanding() {
     presetCapture.copyPresetToClipboard('Custom Preset')
   }
 
+  const handlePlayCameraAnimation = (settings: CameraAnimationSettings) => {
+    // If already playing, pause/stop
+    if (cameraAnimPlaying) {
+      if (settings.mode === 'smooth') {
+        setSmoothCameraAnim(null)
+      } else {
+        if (cameraAnimIntervalRef.current) clearInterval(cameraAnimIntervalRef.current)
+        cameraAnimIntervalRef.current = null
+      }
+      setCameraAnimPlaying(false)
+      console.info('[CameraAnimation] Paused')
+      return
+    }
+
+    // Filter viewpoints by selected types
+    const filteredViewpoints = cameraViewpoints.filter(vp => {
+      if (vp.type === 'corner' && settings.viewpointTypes.corner) return true
+      if (vp.type === 'edge' && settings.viewpointTypes.edge) return true
+      if (vp.type === 'face' && settings.viewpointTypes.face) return true
+      return false
+    })
+
+    if (filteredViewpoints.length < 2) {
+      console.warn('[CameraAnimation] Need at least 2 viewpoints')
+      return
+    }
+
+    console.info(`[CameraAnimation] Playing ${filteredViewpoints.length} viewpoints over ${settings.duration}s (${settings.mode} mode)`)
+    setCameraAnimPlaying(true)
+
+    if (settings.mode === 'smooth') {
+      // Create smooth curves through viewpoint positions and targets
+      const positions = filteredViewpoints.map(vp => vp.position.clone())
+      const targets = filteredViewpoints.map(vp => vp.target.clone())
+      
+      const positionCurve = new THREE.CatmullRomCurve3(positions, true, 'centripetal', 0.5)
+      const targetCurve = new THREE.CatmullRomCurve3(targets, true, 'centripetal', 0.5)
+      
+      setSmoothCameraAnim({
+        isActive: true,
+        curve: positionCurve,
+        targetCurve: targetCurve,
+        startTime: Date.now(),
+        duration: settings.duration,
+        lookAhead: settings.lookAhead,
+        loop: settings.loop,
+        easing: settings.easing,
+      })
+    } else {
+      // Stepped mode - jump between viewpoints
+      const getFullIndex = (filtered: CameraViewpoint) => {
+        return cameraViewpoints.findIndex(vp => vp === filtered)
+      }
+      
+      const timePerViewpoint = (settings.duration * 1000) / filteredViewpoints.length
+      cameraAnimStateRef.current = { filteredViewpoints, currentIndex: 0, timePerViewpoint }
+      setCameraViewpoint(getFullIndex(filteredViewpoints[0]))
+
+      const runAnimation = () => {
+        cameraAnimStateRef.current!.currentIndex++
+        if (cameraAnimStateRef.current!.currentIndex >= filteredViewpoints.length) {
+          if (settings.loop) {
+            cameraAnimStateRef.current!.currentIndex = 0
+          } else {
+            if (cameraAnimIntervalRef.current) clearInterval(cameraAnimIntervalRef.current)
+            cameraAnimIntervalRef.current = null
+            cameraAnimStateRef.current = null
+            setCameraAnimPlaying(false)
+            console.info('[CameraAnimation] Animation complete')
+            return
+          }
+        }
+        setCameraViewpoint(getFullIndex(filteredViewpoints[cameraAnimStateRef.current!.currentIndex]))
+      }
+
+      cameraAnimIntervalRef.current = window.setInterval(runAnimation, timePerViewpoint)
+    }
+  }
+
+  const handleSmoothAnimComplete = () => {
+    setSmoothCameraAnim(null)
+    setCameraAnimPlaying(false)
+    console.info('[CameraAnimation] Smooth animation complete')
+  }
+
   if (mode === 'STORY_MODE') {
     return (
       <div style={styles.storyModePlaceholder}>
@@ -1189,7 +1332,7 @@ export function AppLanding() {
         }}
       >
         {debugMode ? (
-          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} />
+          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} smoothCameraAnim={smoothCameraAnim} onSmoothAnimComplete={handleSmoothAnimComplete} />
         ) : (
           <SculptureScene onSculptureLoaded={handleSculptureLoaded} />
         )}
@@ -1197,11 +1340,11 @@ export function AppLanding() {
 
       {debugMode && (
         <div style={styles.debugPanel}>
-          <h3 style={{ margin: '0 0 16px 0', color: '#fff' }}>Debug Controls</h3>
+          <h3 style={{ margin: '0 0 8px 0', color: '#fff', fontSize: '11px' }}>Debug Controls</h3>
           
           {rendererInfo && (
-            <div style={{ marginBottom: '16px', padding: '8px', background: '#1a1a1a', borderRadius: '4px', fontSize: '13px' }}>
-              <div style={{ color: '#4a9eff', marginBottom: '4px' }}>
+            <div style={{ marginBottom: '6px', padding: '6px', background: '#1a1a1a', borderRadius: '4px', fontSize: '11px' }}>
+              <div style={{ color: '#4a9eff', marginBottom: '2px' }}>
                 {rendererInfo.webglVersion} {webgpuSupported ? '• WebGPU Ready' : ''}
               </div>
               <div style={{ color: '#888', fontSize: '12px', wordBreak: 'break-word' }}>
@@ -1210,10 +1353,10 @@ export function AppLanding() {
             </div>
           )}
           
-          <div style={{ marginBottom: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Scale to Heartline</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '15px' }}>Full</span>
+          <div style={{ marginBottom: '6px' }}>
+            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Scale to Heartline</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Full</span>
               <input
                 type="range"
                 min={0}
@@ -1223,17 +1366,17 @@ export function AppLanding() {
                 onChange={(e) => setLoftProgress(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '15px' }}>Core</span>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Core</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
               Scale: <strong>{((1.0 - loftProgress * 0.975) * 100).toFixed(1)}%</strong>
             </div>
           </div>
           
-          <div style={{ marginBottom: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Straighten to Polyline</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '15px' }}>Curve</span>
+          <div style={{ marginBottom: '6px' }}>
+            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Straighten to Polyline</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Curve</span>
               <input
                 type="range"
                 min={0}
@@ -1243,17 +1386,17 @@ export function AppLanding() {
                 onChange={(e) => setStraighten(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '15px' }}>Stick</span>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Stick</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
               Straighten: <strong>{(straighten * 100).toFixed(0)}%</strong>
             </div>
           </div>
           
-          <div style={{ marginBottom: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Corner Spheres</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '15px' }}>Off</span>
+          <div style={{ marginBottom: '6px' }}>
+            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Corner Spheres</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Off</span>
               <input
                 type="range"
                 min={0}
@@ -1263,17 +1406,17 @@ export function AppLanding() {
                 onChange={(e) => setSphereRadius(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '15px' }}>Large</span>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Large</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
               Radius: <strong>{sphereRadius > 0 ? sphereRadius.toFixed(2) : 'Off'}</strong>
             </div>
           </div>
           
-          <div style={{ marginBottom: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Galaxy Stars</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '15px' }}>None</span>
+          <div style={{ marginBottom: '6px' }}>
+            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Galaxy Stars</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>None</span>
               <input
                 type="range"
                 min={0}
@@ -1283,17 +1426,17 @@ export function AppLanding() {
                 onChange={(e) => setStarDensity(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '15px' }}>Max</span>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Max</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
               Density: <strong>{(starDensity * 100).toFixed(0)}%</strong>
             </div>
           </div>
           
-          <div style={{ marginBottom: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Galaxy Size</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '15px' }}>1x</span>
+          <div style={{ marginBottom: '6px' }}>
+            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Galaxy Size</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>1x</span>
               <input
                 type="range"
                 min={1}
@@ -1303,17 +1446,17 @@ export function AppLanding() {
                 onChange={(e) => setGalaxySize(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '15px' }}>10x</span>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>10x</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
               Size: <strong>{galaxySize.toFixed(1)}x</strong> radius
             </div>
           </div>
           
-          <div style={{ marginBottom: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Star Scaler</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '15px' }}>Tiny</span>
+          <div style={{ marginBottom: '6px' }}>
+            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Star Scaler</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Tiny</span>
               <input
                 type="range"
                 min={0}
@@ -1323,17 +1466,17 @@ export function AppLanding() {
                 onChange={(e) => setStarScale(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '15px' }}>Touch</span>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Touch</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
               Scale: <strong>{(starScale * 100).toFixed(0)}%</strong>
             </div>
           </div>
           
-          <div style={{ marginBottom: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Cosmic Scaler</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '15px' }}>Cosmic</span>
+          <div style={{ marginBottom: '6px' }}>
+            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Cosmic Scaler</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Cosmic</span>
               <input
                 type="range"
                 min={0}
@@ -1343,17 +1486,17 @@ export function AppLanding() {
                 onChange={(e) => setCosmicScale(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '15px' }}>Atomic</span>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Atomic</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
               Lattice: <strong>{(cosmicScale * 100).toFixed(0)}%</strong>
             </div>
           </div>
           
-          <div style={{ marginBottom: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Atom Bonds</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '15px' }}>None</span>
+          <div style={{ marginBottom: '6px' }}>
+            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Atom Bonds</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>None</span>
               <input
                 type="range"
                 min={0}
@@ -1363,17 +1506,17 @@ export function AppLanding() {
                 onChange={(e) => setBondDensity(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '15px' }}>Full</span>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Full</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
               Bonds: <strong>{bondDensity > 0 ? `${(bondDensity * 100).toFixed(0)}%` : 'Off'}</strong>
             </div>
           </div>
           
-          <div>
-            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Rotation Speed</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '15px' }}>Slow</span>
+          <div style={{ marginBottom: '6px' }}>
+            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Rotation Speed</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Slow</span>
               <input
                 type="range"
                 min={0}
@@ -1383,18 +1526,18 @@ export function AppLanding() {
                 onChange={(e) => setRotateSpeed(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '15px' }}>Fast</span>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Fast</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
               Speed: <strong>{rotateSpeed.toFixed(3)}</strong>
             </div>
           </div>
           
           {cameraViewpoints.length > 0 && (
-            <div style={{ marginTop: '16px' }}>
-              <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Camera Viewpoint</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-                <span style={{ color: '#888', fontSize: '15px' }}>Free</span>
+            <div style={{ marginBottom: '6px' }}>
+              <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Camera Viewpoint</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+                <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Free</span>
                 <input
                   type="range"
                   min={-1}
@@ -1404,25 +1547,25 @@ export function AppLanding() {
                   onChange={(e) => setCameraViewpoint(parseInt(e.target.value))}
                   style={{ flex: 1 }}
                 />
-                <span style={{ color: '#888', fontSize: '15px' }}>{cameraViewpoints.length}</span>
+                <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>{cameraViewpoints.length}</span>
               </div>
-              <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+              <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
                 {cameraViewpoint < 0 ? (
                   <span>Mode: <strong>Free Camera</strong></span>
                 ) : (
                   <span>
                     <strong>{cameraViewpoints[cameraViewpoint]?.label}</strong>
-                    <span style={{ color: '#888', marginLeft: '8px' }}>({cameraViewpoints[cameraViewpoint]?.type})</span>
+                    <span style={{ color: '#888', marginLeft: '6px', fontSize: '11px' }}>({cameraViewpoints[cameraViewpoint]?.type})</span>
                   </span>
                 )}
               </div>
             </div>
           )}
           
-          <div style={{ marginTop: '16px' }}>
-            <div style={{ color: '#aaa', fontSize: '16px', marginBottom: '8px' }}>Camera Lens</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '12px' }}>
-              <span style={{ color: '#888', fontSize: '15px' }}>20mm</span>
+          <div>
+            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Camera Lens</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>20mm</span>
               <input
                 type="range"
                 min={20}
@@ -1432,11 +1575,11 @@ export function AppLanding() {
                 onChange={(e) => setLensLength(parseFloat(e.target.value))}
                 style={{ flex: 1 }}
               />
-              <span style={{ color: '#888', fontSize: '15px' }}>300mm</span>
+              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>300mm</span>
             </div>
-            <div style={{ marginTop: '4px', color: '#fff', fontSize: '16px' }}>
+            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
               Lens: <strong>{lensLength}mm</strong>
-              <span style={{ color: '#888', marginLeft: '8px' }}>(FOV {cameraFov.toFixed(1)}°)</span>
+              <span style={{ color: '#888', marginLeft: '6px', fontSize: '11px' }}>(FOV {cameraFov.toFixed(1)}°)</span>
             </div>
           </div>
         </div>
@@ -1471,6 +1614,13 @@ export function AppLanding() {
         >
           📋
         </button>
+        <button
+          style={styles.toolbarButton}
+          onClick={() => setCameraAnimModalOpen(true)}
+          title="Camera Animation"
+        >
+          🎬
+        </button>
       </div>
 
       <div style={styles.info}>
@@ -1491,6 +1641,14 @@ export function AppLanding() {
         isOpen={materialModalOpen}
         onClose={() => setMaterialModalOpen(false)}
       />
+
+      <CameraAnimationModal
+        isOpen={cameraAnimModalOpen}
+        onClose={() => setCameraAnimModalOpen(false)}
+        onSettingsChange={setCameraAnimSettings}
+        onPlay={handlePlayCameraAnimation}
+        isPlaying={cameraAnimPlaying}
+      />
     </div>
   )
 }
@@ -1506,7 +1664,7 @@ const styles: Record<string, React.CSSProperties> = {
     top: '20px',
     right: '20px',
     display: 'flex',
-    gap: '8px',
+    gap: '4px',
   },
   toolbarButton: {
     width: '44px',
@@ -1563,13 +1721,14 @@ const styles: Record<string, React.CSSProperties> = {
   },
   debugPanel: {
     position: 'absolute',
-    top: '20px',
-    left: '20px',
+    top: '10px',
+    left: '10px',
     background: 'rgba(0,0,0,0.85)',
-    padding: '16px 20px',
-    borderRadius: '10px',
-    minWidth: '560px',
+    padding: '8px 12px',
+    borderRadius: '6px',
+    width: '220px',
     fontFamily: 'sans-serif',
+    fontSize: '12px',
   },
 }
 
