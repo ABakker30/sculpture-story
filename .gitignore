@@ -28,5 +28,5 @@ Thumbs.db
 # Local Netlify folder
 .netlify
 
-# Large PBR texture files (use external hosting)
-public/PBR/*.zip
+# Large PBR texture files tracked via Git LFS
+# public/PBR/*.zip
