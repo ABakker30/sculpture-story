@@ -35,29 +35,22 @@ export function MaterialModal({ isOpen, onClose }: MaterialModalProps) {
   }, [isOpen])
 
   const fetchPBRFiles = async () => {
+    // GitHub LFS raw URL for PBR files (Netlify doesn't support Git LFS)
+    const GITHUB_LFS_BASE = 'https://media.githubusercontent.com/media/ABakker30/sculpture-story/master/public/PBR'
+    
     try {
-      // Fetch the directory listing from a manifest file or use a known list
-      // For now, we'll fetch a manifest.json that lists available PBR zips
+      // Fetch manifest from local (small file, not in LFS)
       const response = await fetch('/PBR/manifest.json')
       if (response.ok) {
         const files: string[] = await response.json()
-        setPbrFiles(files.map(f => ({ name: f.replace('.zip', ''), path: `/PBR/${f}` })))
+        // Use GitHub LFS URLs for the actual zip files
+        setPbrFiles(files.map(f => ({ name: f.replace('.zip', ''), path: `${GITHUB_LFS_BASE}/${f}` })))
       }
     } catch {
-      // If no manifest, try to use a hardcoded list or leave empty
-      console.info('[MaterialModal] No PBR manifest found, scanning known files')
-      // Fallback: try known files
-      const knownFiles = ['FabricTarpPlastic001.zip']
-      const validFiles: PBRFile[] = []
-      for (const file of knownFiles) {
-        try {
-          const resp = await fetch(`/PBR/${file}`, { method: 'HEAD' })
-          if (resp.ok) {
-            validFiles.push({ name: file.replace('.zip', ''), path: `/PBR/${file}` })
-          }
-        } catch { /* ignore */ }
-      }
-      setPbrFiles(validFiles)
+      // Fallback: hardcoded list with GitHub LFS URLs
+      console.info('[MaterialModal] No PBR manifest found, using hardcoded list')
+      const knownFiles = ['FabricTarpPlastic001.zip', 'MarbleCarraraHoned001.zip', 'MetalMachiningRadial001.zip']
+      setPbrFiles(knownFiles.map(f => ({ name: f.replace('.zip', ''), path: `${GITHUB_LFS_BASE}/${f}` })))
     }
   }
 
