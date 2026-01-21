@@ -6,6 +6,8 @@ interface CameraAnimationModalProps {
   onSettingsChange?: (settings: CameraAnimationSettings) => void
   onPlay?: (settings: CameraAnimationSettings) => void
   isPlaying?: boolean
+  showHull?: boolean
+  onShowHullChange?: (show: boolean) => void
 }
 
 export interface CameraAnimationSettings {
@@ -34,7 +36,7 @@ const DEFAULT_SETTINGS: CameraAnimationSettings = {
   loop: true,
 }
 
-export function CameraAnimationModal({ isOpen, onClose, onSettingsChange, onPlay, isPlaying = false }: CameraAnimationModalProps) {
+export function CameraAnimationModal({ isOpen, onClose, onSettingsChange, onPlay, isPlaying = false, showHull = false, onShowHullChange }: CameraAnimationModalProps) {
   const [settings, setSettings] = useState<CameraAnimationSettings>(DEFAULT_SETTINGS)
   const [position, setPosition] = useState({ x: 400, y: 120 })
   const [isDragging, setIsDragging] = useState(false)
@@ -130,19 +132,26 @@ export function CameraAnimationModal({ isOpen, onClose, onSettingsChange, onPlay
           </div>
         </Section>
 
-        <Section title="Path Duration">
+        <Section title="Animation Speed">
           <div style={styles.row}>
-            <label style={styles.label}>Duration</label>
+            <label style={styles.label}>Speed</label>
             <input
               type="range"
-              min={10}
-              max={600}
-              step={10}
-              value={settings.duration}
-              onChange={(e) => updateSetting('duration', parseInt(e.target.value))}
+              min={0.5}
+              max={100}
+              step={0.5}
+              value={Math.round(600 / settings.duration * 10) / 10}
+              onChange={(e) => {
+                const speed = parseFloat(e.target.value)
+                const duration = Math.round(600 / speed)
+                updateSetting('duration', Math.max(6, Math.min(1200, duration)))
+              }}
               style={styles.slider}
             />
-            <span style={styles.value}>{settings.duration >= 60 ? `${(settings.duration / 60).toFixed(1)}m` : `${settings.duration}s`}</span>
+            <span style={styles.value}>{(Math.round(600 / settings.duration * 10) / 10).toFixed(1)}x</span>
+          </div>
+          <div style={{ color: '#666', fontSize: '11px', marginTop: '4px' }}>
+            Duration: {settings.duration >= 60 ? `${(settings.duration / 60).toFixed(1)} min` : `${settings.duration} sec`}
           </div>
           <label style={styles.checkboxLabel}>
             <input
@@ -188,6 +197,15 @@ export function CameraAnimationModal({ isOpen, onClose, onSettingsChange, onPlay
           <div style={styles.viewpointInfo}>
             Selected types will be used to generate camera path waypoints
           </div>
+          <label style={{ ...styles.checkboxLabel, marginTop: '12px', paddingTop: '12px', borderTop: '1px solid #333' }}>
+            <input
+              type="checkbox"
+              checked={showHull}
+              onChange={(e) => onShowHullChange?.(e.target.checked)}
+              style={styles.checkbox}
+            />
+            Show Convex Hull
+          </label>
         </Section>
 
         <Section title="Look Ahead">

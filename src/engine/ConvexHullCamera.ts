@@ -128,4 +128,37 @@ export function computeHullCameraPositions(pathCorners: THREE.Vector3[]): Camera
   return viewpoints
 }
 
-export default { computeHullCameraPositions }
+/**
+ * Create a wireframe geometry for the convex hull visualization
+ */
+export function createHullGeometry(pathCorners: THREE.Vector3[]): THREE.BufferGeometry | null {
+  if (pathCorners.length < 4) return null
+  
+  const points: [number, number, number][] = pathCorners.map(p => [p.x, p.y, p.z])
+  const faces = qh(points)
+  
+  // Create line segments for hull edges
+  const vertices: number[] = []
+  const usedEdges = new Set<string>()
+  
+  faces.forEach(face => {
+    for (let i = 0; i < face.length; i++) {
+      const idx1 = face[i]
+      const idx2 = face[(i + 1) % face.length]
+      const edgeKey = idx1 < idx2 ? `${idx1}-${idx2}` : `${idx2}-${idx1}`
+      
+      if (!usedEdges.has(edgeKey)) {
+        usedEdges.add(edgeKey)
+        const p1 = pathCorners[idx1]
+        const p2 = pathCorners[idx2]
+        vertices.push(p1.x, p1.y, p1.z, p2.x, p2.y, p2.z)
+      }
+    }
+  })
+  
+  const geometry = new THREE.BufferGeometry()
+  geometry.setAttribute('position', new THREE.Float32BufferAttribute(vertices, 3))
+  return geometry
+}
+
+export default { computeHullCameraPositions, createHullGeometry }

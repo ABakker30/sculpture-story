@@ -9,7 +9,7 @@ import sculptureBuilder, { SculptureData } from './engine/SculptureBuilder'
 import lightingController from './engine/LightingController'
 import materialController from './engine/MaterialController'
 import cameraController from './engine/CameraController'
-import { computeHullCameraPositions, CameraViewpoint } from './engine/ConvexHullCamera'
+import { computeHullCameraPositions, createHullGeometry, CameraViewpoint } from './engine/ConvexHullCamera'
 import { isWebGPUSupported, getRendererInfo } from './engine/RendererFactory'
 import presetCapture from './engine/PresetCapture'
 import modeController, { AppMode } from './engine/ModeController'
@@ -22,7 +22,6 @@ interface SmoothCameraAnimation {
   isActive: boolean
   curve: THREE.CatmullRomCurve3 | null
   targetCurve: THREE.CatmullRomCurve3 | null
-  startTime: number
   duration: number
   lookAhead: number
   loop: boolean
@@ -47,6 +46,7 @@ interface DebugSceneProps {
   onCameraViewpointsComputed: (viewpoints: CameraViewpoint[]) => void
   smoothCameraAnim: SmoothCameraAnimation | null
   onSmoothAnimComplete?: () => void
+  showHull: boolean
 }
 
 // Detect lattice type from corner distances and angles
@@ -247,7 +247,7 @@ function generateLatticePoints(
   return points
 }
 
-function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed, smoothCameraAnim, onSmoothAnimComplete }: DebugSceneProps) {
+function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed, smoothCameraAnim, onSmoothAnimComplete, showHull }: DebugSceneProps) {
   const { scene, gl, camera } = useThree()
   const meshRef = useRef<THREE.Mesh | null>(null)
   const crossSectionsRef = useRef<THREE.Group | null>(null)
@@ -259,6 +259,10 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   const latticeTypeRef = useRef<'SC' | 'BCC' | 'FCC'>('SC')
   const latticeConstantRef = useRef<number>(1)
   const cameraViewpointsRef = useRef<CameraViewpoint[]>([])
+  const hullLinesRef = useRef<THREE.LineSegments | null>(null)
+  const smoothAnimElapsedRef = useRef<number>(0)
+  const animZoomOffsetRef = useRef<number>(1.0)
+  const lastAnimDistanceRef = useRef<number | null>(null)
   const targetCameraPos = useRef<THREE.Vector3 | null>(null)
   const targetCameraLookAt = useRef<THREE.Vector3 | null>(null)
   const dataRef = useRef<{
@@ -427,6 +431,17 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       cameraViewpointsRef.current = viewpoints
       onCameraViewpointsComputed(viewpoints)
       
+      // Create hull wireframe visualization
+      const hullGeometry = createHullGeometry(pathCorners)
+      if (hullGeometry) {
+        const hullMaterial = new THREE.LineBasicMaterial({ color: 0x4a9eff, opacity: 0.6, transparent: true })
+        const hullLines = new THREE.LineSegments(hullGeometry, hullMaterial)
+        hullLines.name = 'CONVEX_HULL_LINES'
+        hullLines.visible = false
+        scene.add(hullLines)
+        hullLinesRef.current = hullLines
+      }
+      
       console.info(`[DEBUG] Loaded ${sortedNames.length} cross-sections`)
       console.info(`[DEBUG] Path corners: ${pathCorners.length} unique vertices`)
       console.info(`[DEBUG] Bounding sphere radius: ${boundingSphere.radius.toFixed(2)}, cosmic stars: ${numCosmicStars}, lattice points: ${latticePointsRef.current.length}`)
@@ -452,9 +467,91 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         scene.remove(bondsRef.current)
         bondsRef.current.geometry.dispose()
       }
+      if (hullLinesRef.current) {
+        scene.remove(hullLinesRef.current)
+        hullLinesRef.current.geometry.dispose()
+      }
     }
   // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [scene, gl, camera])
+
+  // Toggle hull visibility
+  useEffect(() => {
+    if (hullLinesRef.current) {
+      hullLinesRef.current.visible = showHull
+    }
+  }, [showHull])
+
+  // Reset animation elapsed time and zoom offset when smooth animation starts
+  useEffect(() => {
+    if (smoothCameraAnim?.isActive) {
+      smoothAnimElapsedRef.current = 0
+      animZoomOffsetRef.current = 1.0
+      lastAnimDistanceRef.current = null
+    }
+  }, [smoothCameraAnim])
+
+  // Listen for user zoom during animation (wheel/pinch events on canvas)
+  useEffect(() => {
+    if (!smoothCameraAnim?.isActive) return
+    
+    const canvas = gl.domElement
+    
+    // Accumulate wheel delta for hysteresis
+    let wheelAccum = 0
+    const WHEEL_THRESHOLD = 50
+    
+    const handleWheel = (e: WheelEvent) => {
+      wheelAccum += e.deltaY
+      // Only apply zoom when accumulated delta exceeds threshold
+      if (Math.abs(wheelAccum) > WHEEL_THRESHOLD) {
+        const zoomDelta = wheelAccum > 0 ? 1.15 : 0.87
+        animZoomOffsetRef.current = Math.max(0.1, Math.min(20.0, animZoomOffsetRef.current * zoomDelta))
+        wheelAccum = 0
+      }
+      e.preventDefault()
+    }
+    
+    // Track pinch zoom for touch devices with hysteresis
+    let lastTouchDistance = 0
+    let touchZoomAccum = 1.0
+    const TOUCH_THRESHOLD = 0.08
+    
+    const handleTouchStart = (e: TouchEvent) => {
+      if (e.touches.length === 2) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX
+        const dy = e.touches[0].clientY - e.touches[1].clientY
+        lastTouchDistance = Math.sqrt(dx * dx + dy * dy)
+        touchZoomAccum = 1.0
+      }
+    }
+    
+    const handleTouchMove = (e: TouchEvent) => {
+      if (e.touches.length === 2 && lastTouchDistance > 0) {
+        const dx = e.touches[0].clientX - e.touches[1].clientX
+        const dy = e.touches[0].clientY - e.touches[1].clientY
+        const newDistance = Math.sqrt(dx * dx + dy * dy)
+        touchZoomAccum *= lastTouchDistance / newDistance
+        lastTouchDistance = newDistance
+        // Only apply when accumulated change exceeds threshold
+        if (Math.abs(touchZoomAccum - 1.0) > TOUCH_THRESHOLD) {
+          animZoomOffsetRef.current = Math.max(0.1, Math.min(20.0, animZoomOffsetRef.current * touchZoomAccum))
+          touchZoomAccum = 1.0
+        }
+        e.preventDefault()
+      }
+    }
+    
+    canvas.addEventListener('wheel', handleWheel, { passive: false })
+    canvas.addEventListener('touchstart', handleTouchStart, { passive: true })
+    canvas.addEventListener('touchmove', handleTouchMove, { passive: false })
+    
+    return () => {
+      canvas.removeEventListener('wheel', handleWheel)
+      canvas.removeEventListener('touchstart', handleTouchStart)
+      canvas.removeEventListener('touchmove', handleTouchMove)
+    }
+  }, [smoothCameraAnim?.isActive, gl])
 
   // Camera viewpoint effect - animate to selected viewpoint
   useEffect(() => {
@@ -918,7 +1015,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     })
     
     const geometry = createLoftGeometry(transformedSections)
-    geometry.computeVertexNormals()
+    // Custom normals are computed in createLoftGeometry with seam averaging
     
     const mesh = new THREE.Mesh(geometry, materialController.getMaterial())
     mesh.name = 'DEBUG_LOFT_MESH'
@@ -927,25 +1024,30 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     
   }, [loftProgress, straighten, initialized, scene])
 
-  useFrame(() => {
+  useFrame((_, delta) => {
     if (controlsRef.current) controlsRef.current.update()
     
-    // Smooth camera animation along curve
+    // Smooth camera animation along curve - using delta time for consistent speed
     if (smoothCameraAnim?.isActive && smoothCameraAnim.curve && smoothCameraAnim.targetCurve) {
-      const elapsed = (Date.now() - smoothCameraAnim.startTime) / 1000
-      let rawT = elapsed / smoothCameraAnim.duration
+      // Clamp delta to avoid large jumps (e.g., when tab is backgrounded)
+      const clampedDelta = Math.min(delta, 0.1)
+      smoothAnimElapsedRef.current += clampedDelta
+      
+      let rawT = smoothAnimElapsedRef.current / smoothCameraAnim.duration
       
       // Handle loop or completion
       if (rawT >= 1) {
         if (smoothCameraAnim.loop) {
-          rawT = rawT % 1
+          smoothAnimElapsedRef.current = smoothAnimElapsedRef.current % smoothCameraAnim.duration
+          rawT = smoothAnimElapsedRef.current / smoothCameraAnim.duration
         } else {
           onSmoothAnimComplete?.()
           return
         }
       }
       
-      // Apply easing
+      // Apply easing only for non-linear modes
+      // For linear, use rawT directly for uniform speed
       let t = rawT
       switch (smoothCameraAnim.easing) {
         case 'easeIn':
@@ -957,28 +1059,40 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         case 'easeInOut':
           t = rawT < 0.5 ? 2 * rawT * rawT : 1 - Math.pow(-2 * rawT + 2, 2) / 2
           break
+        // 'linear' keeps t = rawT for uniform speed
       }
       
-      // Get position on curve
-      const pos = smoothCameraAnim.curve.getPointAt(t)
-      camera.position.copy(pos)
+      // Get base position and target from curves
+      const basePos = smoothCameraAnim.curve.getPointAt(t)
+      let targetPos: THREE.Vector3
       
       // Get look target - blend between target curve and look-ahead on position curve
       const lookAheadAmount = smoothCameraAnim.lookAhead / 100
       if (lookAheadAmount > 0) {
         const lookT = (t + lookAheadAmount * 0.1) % 1
         const lookAheadPos = smoothCameraAnim.curve.getPointAt(lookT)
-        const targetPos = smoothCameraAnim.targetCurve.getPointAt(t)
-        const blendedTarget = new THREE.Vector3().lerpVectors(targetPos, lookAheadPos, lookAheadAmount)
-        if (controlsRef.current) {
-          controlsRef.current.target.copy(blendedTarget)
-        }
+        const curveTargetPos = smoothCameraAnim.targetCurve.getPointAt(t)
+        targetPos = new THREE.Vector3().lerpVectors(curveTargetPos, lookAheadPos, lookAheadAmount)
       } else {
-        const targetPos = smoothCameraAnim.targetCurve.getPointAt(t)
-        if (controlsRef.current) {
-          controlsRef.current.target.copy(targetPos)
-        }
+        targetPos = smoothCameraAnim.targetCurve.getPointAt(t)
       }
+      
+      // Calculate base distance from target to position
+      const baseDistance = basePos.distanceTo(targetPos)
+      
+      // Apply zoom offset to position (move camera along direction from target)
+      const direction = new THREE.Vector3().subVectors(basePos, targetPos).normalize()
+      const zoomedDistance = baseDistance * animZoomOffsetRef.current
+      const finalPos = targetPos.clone().add(direction.multiplyScalar(zoomedDistance))
+      
+      // Set the target first, then position
+      if (controlsRef.current) {
+        controlsRef.current.target.copy(targetPos)
+      }
+      camera.position.copy(finalPos)
+      
+      // Store expected distance for next frame's zoom detection
+      lastAnimDistanceRef.current = zoomedDistance
       return
     }
     
@@ -1018,38 +1132,41 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
 }
 
 function createLoftGeometry(sections: THREE.Vector3[][]): THREE.BufferGeometry {
-  const vps = sections[0].length
-  const numSections = sections.length
+  const vps = sections[0].length - 1 // Exclude last point (same as first for closed sections)
+  const numSections = sections.length - 1 // Exclude last section (reuse first for closed loft)
   const positions: number[] = []
   const indices: number[] = []
   const uvs: number[] = []
   
+  // Create vertices - skip last point of each section AND skip last section
   for (let s = 0; s < numSections; s++) {
-    const v = s / (numSections - 1)
+    const v = s / numSections // Adjusted for closed loop
     for (let i = 0; i < vps; i++) {
       const pt = sections[s][i]
       positions.push(pt.x, pt.y, pt.z)
-      const u = i / (vps - 1)
+      const u = i / vps
       uvs.push(u, v)
     }
   }
   
-  for (let s = 0; s < numSections - 1; s++) {
-    for (let i = 0; i < vps - 1; i++) {
+  // Create faces - wrap both vertex and section indices for closed loft
+  for (let s = 0; s < numSections; s++) {
+    const sNext = (s + 1) % numSections // Wrap to section 0 for closing
+    for (let i = 0; i < vps; i++) {
       const c = s * vps + i
-      indices.push(c, (s + 1) * vps + i, c + 1)
-      indices.push(c + 1, (s + 1) * vps + i, (s + 1) * vps + i + 1)
+      const next = s * vps + ((i + 1) % vps)
+      const cBelow = sNext * vps + i
+      const nextBelow = sNext * vps + ((i + 1) % vps)
+      indices.push(c, cBelow, next)
+      indices.push(next, cBelow, nextBelow)
     }
-    const last = vps - 1
-    const c = s * vps + last
-    indices.push(c, (s + 1) * vps + last, s * vps)
-    indices.push(s * vps, (s + 1) * vps + last, (s + 1) * vps)
   }
   
   const geo = new THREE.BufferGeometry()
   geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
   geo.setAttribute('uv', new THREE.Float32BufferAttribute(uvs, 2))
   geo.setIndex(indices)
+  geo.computeVertexNormals() // Works correctly since both seams share vertices
   return geo
 }
 
@@ -1158,6 +1275,8 @@ function LoadingIndicator() {
 export function AppLanding() {
   const [lightingModalOpen, setLightingModalOpen] = useState(false)
   const [materialModalOpen, setMaterialModalOpen] = useState(false)
+  const [debugPanelOpen, setDebugPanelOpen] = useState(false)
+  const [showHull, setShowHull] = useState(false)
   const [cameraAnimModalOpen, setCameraAnimModalOpen] = useState(false)
   const [_cameraAnimSettings, setCameraAnimSettings] = useState<CameraAnimationSettings>({
     duration: 30,
@@ -1255,11 +1374,11 @@ export function AppLanding() {
       const positionCurve = new THREE.CatmullRomCurve3(positions, true, 'centripetal', 0.5)
       const targetCurve = new THREE.CatmullRomCurve3(targets, true, 'centripetal', 0.5)
       
+      // Reset elapsed time ref in DebugLoftScene will be handled by the animation starting fresh
       setSmoothCameraAnim({
         isActive: true,
         curve: positionCurve,
         targetCurve: targetCurve,
-        startTime: Date.now(),
         duration: settings.duration,
         lookAhead: settings.lookAhead,
         loop: settings.loop,
@@ -1332,15 +1451,21 @@ export function AppLanding() {
         }}
       >
         {debugMode ? (
-          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} smoothCameraAnim={smoothCameraAnim} onSmoothAnimComplete={handleSmoothAnimComplete} />
+          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} smoothCameraAnim={smoothCameraAnim} onSmoothAnimComplete={handleSmoothAnimComplete} showHull={showHull} />
         ) : (
           <SculptureScene onSculptureLoaded={handleSculptureLoaded} />
         )}
       </Canvas>
 
-      {debugMode && (
+      {debugMode && debugPanelOpen && (
         <div style={styles.debugPanel}>
-          <h3 style={{ margin: '0 0 8px 0', color: '#fff', fontSize: '11px' }}>Debug Controls</h3>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <h3 style={{ margin: 0, color: '#fff', fontSize: '11px' }}>Debug Controls</h3>
+            <button 
+              onClick={() => setDebugPanelOpen(false)} 
+              style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', fontSize: '14px', padding: '0 4px' }}
+            >✕</button>
+          </div>
           
           {rendererInfo && (
             <div style={{ marginBottom: '6px', padding: '6px', background: '#1a1a1a', borderRadius: '4px', fontSize: '11px' }}>
@@ -1621,6 +1746,15 @@ export function AppLanding() {
         >
           🎬
         </button>
+        {debugMode && (
+          <button
+            style={{ ...styles.toolbarButton, background: debugPanelOpen ? '#4488ff' : undefined }}
+            onClick={() => setDebugPanelOpen(!debugPanelOpen)}
+            title="Debug Controls"
+          >
+            🛠️
+          </button>
+        )}
       </div>
 
       <div style={styles.info}>
@@ -1648,6 +1782,8 @@ export function AppLanding() {
         onSettingsChange={setCameraAnimSettings}
         onPlay={handlePlayCameraAnimation}
         isPlaying={cameraAnimPlaying}
+        showHull={showHull}
+        onShowHullChange={setShowHull}
       />
     </div>
   )

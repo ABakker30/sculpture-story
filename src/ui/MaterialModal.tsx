@@ -35,22 +35,24 @@ export function MaterialModal({ isOpen, onClose }: MaterialModalProps) {
   }, [isOpen])
 
   const fetchPBRFiles = async () => {
-    // GitHub LFS raw URL for PBR files (Netlify doesn't support Git LFS)
-    const GITHUB_LFS_BASE = 'https://media.githubusercontent.com/media/ABakker30/sculpture-story/master/public/PBR'
+    // Use local paths for development, GitHub LFS for production (Netlify)
+    const isProduction = window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1'
+    const GITHUB_LFS_BASE = 'https://raw.githubusercontent.com/ABakker30/sculpture-story/master/public/PBR'
+    
+    const getPath = (filename: string) => isProduction ? `${GITHUB_LFS_BASE}/${filename}` : `/PBR/${filename}`
     
     try {
       // Fetch manifest from local (small file, not in LFS)
       const response = await fetch('/PBR/manifest.json')
       if (response.ok) {
         const files: string[] = await response.json()
-        // Use GitHub LFS URLs for the actual zip files
-        setPbrFiles(files.map(f => ({ name: f.replace('.zip', ''), path: `${GITHUB_LFS_BASE}/${f}` })))
+        setPbrFiles(files.map(f => ({ name: f.replace('.zip', ''), path: getPath(f) })))
       }
     } catch {
-      // Fallback: hardcoded list with GitHub LFS URLs
+      // Fallback: hardcoded list
       console.info('[MaterialModal] No PBR manifest found, using hardcoded list')
       const knownFiles = ['FabricTarpPlastic001.zip', 'MarbleCarraraHoned001.zip', 'MetalMachiningRadial001.zip']
-      setPbrFiles(knownFiles.map(f => ({ name: f.replace('.zip', ''), path: `${GITHUB_LFS_BASE}/${f}` })))
+      setPbrFiles(knownFiles.map(f => ({ name: f.replace('.zip', ''), path: getPath(f) })))
     }
   }
 
