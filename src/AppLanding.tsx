@@ -12,6 +12,7 @@ import cameraController from './engine/CameraController'
 import { computeHullCameraPositions, createHullGeometry, CameraViewpoint } from './engine/ConvexHullCamera'
 import { isWebGPUSupported, getRendererInfo } from './engine/RendererFactory'
 import modeController, { AppMode } from './engine/ModeController'
+import { ARController } from './engine/ARController'
 
 import { SettingsModal, CameraAnimationSettings } from './ui/SettingsModal'
 
@@ -1305,6 +1306,11 @@ export function AppLanding() {
   const [rendererInfo, setRendererInfo] = useState<{ vendor: string; renderer: string; webglVersion: string } | null>(null)
   const [debugMode] = useState(true)
   
+  // AR state
+  const [arSupported, setArSupported] = useState(false)
+  const [arActive, setArActive] = useState(false)
+  const arControllerRef = useRef<ARController | null>(null)
+  
   // Convert lens mm to FOV: fov = 2 * atan(36 / (2 * lens_mm)) * (180/PI)
   const cameraFov = 2 * Math.atan(36 / (2 * lensLength)) * (180 / Math.PI)
 
@@ -1317,6 +1323,25 @@ export function AppLanding() {
   useEffect(() => {
     isWebGPUSupported().then(setWebgpuSupported)
   }, [])
+
+  // Check AR support on mount
+  useEffect(() => {
+    const arController = new ARController({
+      onSessionStart: () => setArActive(true),
+      onSessionEnd: () => setArActive(false),
+      onError: (err) => console.error('[AR] Error:', err)
+    })
+    arControllerRef.current = arController
+    arController.isARSupported().then(setArSupported)
+  }, [])
+
+  const handleEnterAR = async () => {
+    if (!arControllerRef.current) return
+    const success = await arControllerRef.current.startARSession()
+    if (!success) {
+      console.warn('[AR] Failed to start AR session')
+    }
+  }
 
   const handleSculptureLoaded = useCallback(() => {
     setSculptureLoaded(true)
@@ -1746,6 +1771,32 @@ export function AppLanding() {
         </svg>
       </button>
 
+      {/* Enter AR button - only show if AR is supported */}
+      {arSupported && !arActive && (
+        <button
+          style={styles.arButton}
+          onClick={handleEnterAR}
+          title="Enter AR"
+        >
+          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+            <path d="M3 4v6h2V6h4V4H3zm18 0h-6v2h4v4h2V4zM3 14v6h6v-2H5v-4H3zm18 0v4h-4v2h6v-6h-2z"/>
+            <circle cx="12" cy="12" r="3"/>
+          </svg>
+          <span style={{ marginLeft: '8px' }}>AR</span>
+        </button>
+      )}
+
+      {/* Exit AR button when in AR */}
+      {arActive && (
+        <button
+          style={styles.arButtonActive}
+          onClick={() => arControllerRef.current?.endARSession()}
+          title="Exit AR"
+        >
+          Exit AR
+        </button>
+      )}
+
       <SettingsModal
         isOpen={settingsModalOpen}
         onClose={() => setSettingsModalOpen(false)}
@@ -1819,6 +1870,38 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'center',
     backdropFilter: 'blur(10px)',
     transition: 'background 0.2s',
+  },
+  arButton: {
+    position: 'absolute',
+    bottom: '20px',
+    left: '20px',
+    padding: '12px 20px',
+    borderRadius: '24px',
+    border: 'none',
+    background: 'rgba(0,0,0,0.7)',
+    color: '#fff',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backdropFilter: 'blur(10px)',
+    fontSize: '14px',
+    fontFamily: 'sans-serif',
+    fontWeight: 500,
+  },
+  arButtonActive: {
+    position: 'absolute',
+    bottom: '20px',
+    left: '20px',
+    padding: '12px 24px',
+    borderRadius: '24px',
+    border: 'none',
+    background: '#ff4444',
+    color: '#fff',
+    cursor: 'pointer',
+    fontSize: '14px',
+    fontFamily: 'sans-serif',
+    fontWeight: 500,
   },
   storyModePlaceholder: {
     width: '100%',
