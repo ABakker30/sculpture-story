@@ -45,6 +45,8 @@ interface DebugSceneProps {
   smoothCameraAnim: SmoothCameraAnimation | null
   onSmoothAnimComplete?: () => void
   showHull: boolean
+  arController?: ARController | null
+  sceneResetTrigger?: number
 }
 
 // Detect lattice type from corner distances and angles
@@ -245,8 +247,72 @@ function generateLatticePoints(
   return points
 }
 
-function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed, smoothCameraAnim, onSmoothAnimComplete, showHull }: DebugSceneProps) {
+function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed, smoothCameraAnim, onSmoothAnimComplete, showHull, arController, sceneResetTrigger }: DebugSceneProps) {
   const { scene, gl, camera } = useThree()
+  
+  // Set up AR controller with renderer, scene, and camera
+  useEffect(() => {
+    if (arController && gl && scene && camera) {
+      arController.setRenderer(gl)
+      arController.setScene(scene)
+      arController.setCamera(camera as THREE.PerspectiveCamera)
+      console.info('[AR] Renderer, scene, and camera set on ARController')
+    }
+  }, [arController, gl, scene, camera])
+  
+  // Reset scene after AR exit
+  useEffect(() => {
+    if (sceneResetTrigger && sceneResetTrigger > 0) {
+      console.info('[Scene] Resetting after AR exit')
+      
+      // Reset camera to initial position
+      camera.position.set(40, 30, 40)
+      camera.lookAt(0, 0, 0)
+      if ('fov' in camera) {
+        (camera as THREE.PerspectiveCamera).fov = cameraFov;
+        (camera as THREE.PerspectiveCamera).updateProjectionMatrix()
+      }
+      
+      // Deep recursive cleanup - find and remove ALL AR artifacts at any level
+      const removeARObjects = (parent: THREE.Object3D) => {
+        const childrenToRemove: THREE.Object3D[] = []
+        
+        parent.children.forEach((child) => {
+          // Check if this is an AR object
+          const isAR = child.name?.startsWith('AR_') || 
+                       (child instanceof THREE.Group && child.scale.x < 0.1 && child.scale.x > 0)
+          
+          if (isAR) {
+            console.info(`[Scene Reset] Found AR object: ${child.type} name="${child.name}" scale=${child.scale.x}`)
+            childrenToRemove.push(child)
+          } else {
+            // Recurse into non-AR children
+            removeARObjects(child)
+          }
+        })
+        
+        childrenToRemove.forEach(child => {
+          console.info(`[Scene Reset] Removing: ${child.type} name="${child.name}"`)
+          parent.remove(child)
+        })
+        
+        return childrenToRemove.length
+      }
+      
+      let totalRemoved = removeARObjects(scene)
+      console.info(`[Scene Reset] Removed ${totalRemoved} AR objects`)
+      
+      // Reset sculpture mesh if it exists
+      const mesh = scene.getObjectByName('DEBUG_LOFT_MESH') as THREE.Mesh | null
+      if (mesh) {
+        mesh.rotation.set(0, 0, 0)
+        mesh.scale.set(1, 1, 1)
+        mesh.position.set(0, 0, 0)
+        mesh.visible = true
+      }
+    }
+  }, [sceneResetTrigger, camera, scene, cameraFov])
+  
   const meshRef = useRef<THREE.Mesh | null>(null)
   const crossSectionsRef = useRef<THREE.Group | null>(null)
   const spheresRef = useRef<THREE.Group | null>(null)
@@ -1020,10 +1086,50 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     scene.add(mesh)
     meshRef.current = mesh
     
-  }, [loftProgress, straighten, initialized, scene])
+    // Set mesh as AR object
+    if (arController) {
+      arController.setARObject(mesh)
+      console.info('[AR] Sculpture mesh set as AR object')
+    }
+    
+  }, [loftProgress, straighten, initialized, scene, arController])
 
+  // Track cleanup frames after AR exit
+  const arCleanupFramesRef = useRef(0)
+  
+  // Set cleanup frames when sceneResetTrigger changes
+  useEffect(() => {
+    if (sceneResetTrigger && sceneResetTrigger > 0) {
+      arCleanupFramesRef.current = 10 // Cleanup for 10 frames
+    }
+  }, [sceneResetTrigger])
+  
   useFrame((_, delta) => {
     if (controlsRef.current) controlsRef.current.update()
+    
+    // Continuous AR cleanup for several frames after AR exit
+    if (arCleanupFramesRef.current > 0) {
+      arCleanupFramesRef.current--
+      
+      // Find and remove any AR objects
+      const toRemove: THREE.Object3D[] = []
+      scene.traverse((obj) => {
+        if (obj.name?.startsWith('AR_')) {
+          toRemove.push(obj)
+        }
+        // Also check for small-scale groups (AR parent)
+        if (obj instanceof THREE.Group && obj.scale.x < 0.1 && obj.scale.x > 0 && obj.parent === scene) {
+          toRemove.push(obj)
+        }
+      })
+      
+      if (toRemove.length > 0) {
+        console.info(`[AR Cleanup Frame] Removing ${toRemove.length} objects`)
+        toRemove.forEach(obj => {
+          obj.removeFromParent()
+        })
+      }
+    }
     
     // Smooth camera animation along curve - using delta time for consistent speed
     if (smoothCameraAnim?.isActive && smoothCameraAnim.curve && smoothCameraAnim.targetCurve) {
@@ -1309,7 +1415,9 @@ export function AppLanding() {
   // AR state
   const [arSupported, setArSupported] = useState(false)
   const [arActive, setArActive] = useState(false)
+  const [arDebug, setArDebug] = useState<string[]>(['Initializing AR...'])
   const arControllerRef = useRef<ARController | null>(null)
+  const [sceneResetTrigger, setSceneResetTrigger] = useState(0)
   
   // Convert lens mm to FOV: fov = 2 * atan(36 / (2 * lens_mm)) * (180/PI)
   const cameraFov = 2 * Math.atan(36 / (2 * lensLength)) * (180 / Math.PI)
@@ -1326,23 +1434,43 @@ export function AppLanding() {
 
   // Check AR support on mount
   useEffect(() => {
+    const addDebug = (msg: string) => setArDebug(prev => [...prev.slice(-9), msg])
+    
+    addDebug(`navigator.xr: ${!!navigator.xr}`)
+    
     const arController = new ARController({
-      onSessionStart: () => setArActive(true),
-      onSessionEnd: () => setArActive(false),
-      onError: (err) => console.error('[AR] Error:', err)
+      onSessionStart: () => { setArActive(true); addDebug('Session started') },
+      onSessionEnd: () => { setArActive(false); addDebug('Session ended') },
+      onSceneReset: () => { addDebug('Reloading page...'); window.location.reload() },
+      onError: (err) => { addDebug(`Error: ${err.message}`) },
+      onDebug: (msg) => { addDebug(msg) }
     })
     arControllerRef.current = arController
+    
+    if (!navigator.xr) {
+      addDebug('WebXR not available')
+      return
+    }
+    
     arController.isARSupported().then((supported) => {
-      console.info(`[AR] Support check result: ${supported}, navigator.xr exists: ${!!navigator.xr}`)
+      addDebug(`AR supported: ${supported}`)
       setArSupported(supported)
+    }).catch(err => {
+      addDebug(`AR check failed: ${err}`)
     })
   }, [])
 
   const handleEnterAR = async () => {
-    if (!arControllerRef.current) return
-    const success = await arControllerRef.current.startARSession()
-    if (!success) {
-      console.warn('[AR] Failed to start AR session')
+    setArDebug(prev => [...prev.slice(-9), 'Attempting to start AR...'])
+    if (!arControllerRef.current) {
+      setArDebug(prev => [...prev.slice(-9), 'No AR controller'])
+      return
+    }
+    try {
+      const success = await arControllerRef.current.startARSession()
+      setArDebug(prev => [...prev.slice(-9), `startARSession result: ${success}`])
+    } catch (err) {
+      setArDebug(prev => [...prev.slice(-9), `AR start error: ${err}`])
     }
   }
 
@@ -1462,8 +1590,9 @@ export function AppLanding() {
           toneMapping: THREE.ACESFilmicToneMapping,
           toneMappingExposure: 1.0,
           powerPreference: 'high-performance',
+          alpha: true,
         }}
-        style={{ background: '#0a0a0a' }}
+        style={{ background: arActive ? 'transparent' : '#0a0a0a' }}
         onCreated={({ gl }: { gl: THREE.WebGLRenderer }) => {
           const info = getRendererInfo(gl)
           setRendererInfo(info)
@@ -1471,7 +1600,7 @@ export function AppLanding() {
         }}
       >
         {debugMode ? (
-          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} smoothCameraAnim={smoothCameraAnim} onSmoothAnimComplete={handleSmoothAnimComplete} showHull={showHull} />
+          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} smoothCameraAnim={smoothCameraAnim} onSmoothAnimComplete={handleSmoothAnimComplete} showHull={showHull} arController={arControllerRef.current} sceneResetTrigger={sceneResetTrigger} />
         ) : (
           <SculptureScene onSculptureLoaded={handleSculptureLoaded} />
         )}
@@ -1759,6 +1888,14 @@ export function AppLanding() {
                 Tools
               </button>
             )}
+            {arSupported && !arActive && (
+              <button
+                style={styles.dropdownItem}
+                onClick={() => { handleEnterAR(); setMenuOpen(false); }}
+              >
+                View in AR
+              </button>
+            )}
           </div>
         )}
       </div>
@@ -1773,21 +1910,6 @@ export function AppLanding() {
           <path d="M8 5v14l11-7z" />
         </svg>
       </button>
-
-      {/* Enter AR button - always show for debugging */}
-      {!arActive && (
-        <button
-          style={{ ...styles.arButton, opacity: arSupported ? 1 : 0.5 }}
-          onClick={arSupported ? handleEnterAR : undefined}
-          title={arSupported ? "Enter AR" : "AR not supported on this device"}
-        >
-          <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M3 4v6h2V6h4V4H3zm18 0h-6v2h4v4h2V4zM3 14v6h6v-2H5v-4H3zm18 0v4h-4v2h6v-6h-2z"/>
-            <circle cx="12" cy="12" r="3"/>
-          </svg>
-          <span style={{ marginLeft: '8px' }}>{arSupported ? 'AR' : 'No AR'}</span>
-        </button>
-      )}
 
       {/* Exit AR button when in AR */}
       {arActive && (
@@ -1905,6 +2027,19 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '14px',
     fontFamily: 'sans-serif',
     fontWeight: 500,
+  },
+  arDebugPanel: {
+    position: 'absolute',
+    bottom: '80px',
+    left: '20px',
+    padding: '10px',
+    borderRadius: '8px',
+    background: 'rgba(0,0,0,0.8)',
+    color: '#fff',
+    fontSize: '11px',
+    fontFamily: 'monospace',
+    maxWidth: '280px',
+    backdropFilter: 'blur(10px)',
   },
   storyModePlaceholder: {
     width: '100%',

@@ -3,12 +3,15 @@ import * as THREE from 'three'
 export interface ARControllerConfig {
   onSessionStart?: () => void
   onSessionEnd?: () => void
+  onSceneReset?: () => void
   onError?: (error: Error) => void
+  onDebug?: (message: string) => void
 }
 
 export class ARController {
   private renderer: THREE.WebGLRenderer | null = null
   private scene: THREE.Scene | null = null
+  private camera: THREE.PerspectiveCamera | null = null
   private xrSession: XRSession | null = null
   private xrRefSpace: XRReferenceSpace | null = null
   private config: ARControllerConfig
@@ -16,6 +19,7 @@ export class ARController {
   // AR object (the sculpture group)
   private arObject: THREE.Object3D | null = null
   private arObjectParent: THREE.Object3D | null = null
+  private arObjectUUIDs: string[] = [] // Track UUIDs of AR objects for cleanup
   
   // Gesture state
   private initialPinchDistance: number = 0
@@ -25,14 +29,21 @@ export class ARController {
   private hitTestSource: XRHitTestSource | null = null
   private reticle: THREE.Mesh | null = null
   
-  // Store original state for restoration
-  private originalParent: THREE.Object3D | null = null
+  // Store original mesh and its state for restoration (no cloning)
+  private originalMesh: THREE.Mesh | null = null
+  private originalMeshParent: THREE.Object3D | null = null
   private originalPosition: THREE.Vector3 = new THREE.Vector3()
   private originalRotation: THREE.Euler = new THREE.Euler()
   private originalScale: THREE.Vector3 = new THREE.Vector3()
+  private originalVisible: boolean = true
 
   constructor(config: ARControllerConfig = {}) {
     this.config = config
+  }
+
+  private debug(message: string): void {
+    console.info(message)
+    this.config.onDebug?.(message)
   }
 
   async isARSupported(): Promise<boolean> {
@@ -54,6 +65,10 @@ export class ARController {
     this.renderer = renderer
   }
 
+  setCamera(camera: THREE.PerspectiveCamera): void {
+    this.camera = camera
+  }
+
   setScene(scene: THREE.Scene): void {
     this.scene = scene
   }
@@ -63,13 +78,20 @@ export class ARController {
   setARObject(object: THREE.Object3D): void {
     this.arObject = object
     // Store original transform
-    this.originalParent = object.parent
+    this.originalMeshParent = object.parent
     this.originalPosition.copy(object.position)
     this.originalRotation.copy(object.rotation)
     this.originalScale.copy(object.scale)
   }
 
   async startARSession(): Promise<boolean> {
+    // If already in a session, end it first
+    if (this.xrSession) {
+      console.info('[ARController] Ending existing session before starting new one')
+      await this.endARSession()
+      return false
+    }
+
     if (!this.renderer || !this.scene) {
       console.error('[ARController] Renderer or scene not set')
       this.config.onError?.(new Error('Renderer or scene not set'))
@@ -83,34 +105,67 @@ export class ARController {
     }
 
     try {
-      // Request AR session with hit-test feature
+      // Request AR session - hit-test is optional
       this.xrSession = await navigator.xr.requestSession('immersive-ar', {
-        requiredFeatures: ['hit-test'],
-        optionalFeatures: ['dom-overlay'],
+        optionalFeatures: ['hit-test', 'dom-overlay', 'local-floor'],
         domOverlay: { root: document.body }
       })
 
       // Enable XR on renderer
       this.renderer.xr.enabled = true
+      
+      // Configure renderer for AR passthrough (transparent background)
+      this.renderer.setClearColor(0x000000, 0)
+      this.renderer.setClearAlpha(0)
+      
       await this.renderer.xr.setSession(this.xrSession)
 
-      // Get reference space
-      this.xrRefSpace = await this.xrSession.requestReferenceSpace('local-floor')
+      // Get reference space - try different types as fallback
+      const refSpaceTypes: XRReferenceSpaceType[] = ['local-floor', 'local', 'viewer']
+      for (const type of refSpaceTypes) {
+        try {
+          this.xrRefSpace = await this.xrSession.requestReferenceSpace(type)
+          console.info(`[ARController] Using reference space: ${type}`)
+          break
+        } catch {
+          console.info(`[ARController] ${type} not supported`)
+        }
+      }
 
-      // Setup hit test for placement
-      const viewerSpace = await this.xrSession.requestReferenceSpace('viewer')
-      this.hitTestSource = await this.xrSession.requestHitTestSource!({ space: viewerSpace }) ?? null
+      if (!this.xrRefSpace) {
+        throw new Error('No supported reference space found')
+      }
 
-      // Create placement reticle
+      // Setup hit-test for surface detection
+      try {
+        const viewerSpace = await this.xrSession.requestReferenceSpace('viewer')
+        this.hitTestSource = await this.xrSession.requestHitTestSource!({ space: viewerSpace }) ?? null
+        this.debug('Hit-test enabled')
+      } catch {
+        this.debug('Hit-test not available')
+      }
+      
+      // Create reticle for placement preview
       this.createReticle()
+      
+      // Hide all meshes initially
+      this.scene?.traverse((obj) => {
+        if (obj instanceof THREE.Mesh && obj.name === 'DEBUG_LOFT_MESH') {
+          obj.visible = false
+        }
+      })
+      
+      // Setup frame loop for hit-test updates
+      this.renderer.setAnimationLoop((_, frame) => this.onXRFrame(frame))
 
       // Setup session end handler
       this.xrSession.addEventListener('end', () => this.onSessionEnd())
 
-      // Setup input handlers for gestures
+      // Setup input handlers for gestures and placement
       this.setupGestureHandlers()
-
+      
       this.isPlaced = false
+      this.debug('Tap surface to place')
       this.config.onSessionStart?.()
       console.info('[ARController] AR session started')
       return true
@@ -131,6 +186,29 @@ export class ARController {
     this.scene?.add(this.reticle)
   }
 
+  private onXRFrame(frame: XRFrame | null): void {
+    if (!frame || !this.xrSession || !this.scene || !this.camera) return
+    
+    // Update hit-test if not yet placed
+    if (!this.isPlaced) {
+      this.updateHitTest(frame)
+    }
+    
+    // Update camera from XR pose
+    const pose = frame.getViewerPose(this.xrRefSpace!)
+    if (pose) {
+      const view = pose.views[0]
+      this.camera.matrix.fromArray(view.transform.matrix)
+      this.camera.matrix.decompose(this.camera.position, this.camera.quaternion, this.camera.scale)
+      this.camera.updateMatrixWorld(true)
+    }
+    
+    // Render the scene
+    if (this.renderer && this.camera) {
+      this.renderer.render(this.scene, this.camera)
+    }
+  }
+
   updateHitTest(frame: XRFrame): void {
     if (!this.hitTestSource || !this.xrRefSpace || this.isPlaced) return
 
@@ -148,25 +226,147 @@ export class ARController {
   }
 
   placeObject(): boolean {
-    if (!this.arObject || !this.reticle || !this.reticle.visible) return false
+    if (!this.scene) {
+      this.debug('Cannot place: no scene')
+      return false
+    }
+    
+    // If no reticle/surface, place at default position in front
+    const placeAtReticle = this.reticle?.visible
+    const placePosition = placeAtReticle && this.reticle 
+      ? this.reticle.position.clone()
+      : new THREE.Vector3(0, -0.3, -0.8) // 0.8m in front, slightly below eye level
+    
+    this.debug(`Placing at ${placeAtReticle ? 'reticle' : 'default'}`)
 
-    // Create AR parent for gesture transforms
+    // Find the sculpture mesh - use ORIGINAL, don't clone
+    const mesh = this.scene.getObjectByName('DEBUG_LOFT_MESH') as THREE.Mesh | null
+    if (!mesh) {
+      this.debug('Cannot place: no sculpture')
+      return false
+    }
+
+    // Store original state for restoration
+    this.originalMesh = mesh
+    this.originalMeshParent = mesh.parent
+    this.originalPosition.copy(mesh.position)
+    this.originalRotation.copy(mesh.rotation)
+    this.originalScale.copy(mesh.scale)
+    this.originalVisible = mesh.visible
+    
+    // Calculate scale to fit in 75cm
+    mesh.geometry.computeBoundingBox()
+    const box = mesh.geometry.boundingBox!
+    const size = new THREE.Vector3()
+    box.getSize(size)
+    const center = new THREE.Vector3()
+    box.getCenter(center)
+    
+    const maxDim = Math.max(size.x, size.y, size.z)
+    const targetSize = 0.75 // 75cm
+    const arScale = maxDim > 0 ? targetSize / maxDim : 0.01
+
+    // Create parent group at placement position
     this.arObjectParent = new THREE.Group()
-    this.arObjectParent.position.copy(this.reticle.position)
-    this.scene?.add(this.arObjectParent)
+    this.arObjectParent.name = 'AR_PARENT_GROUP'
+    this.arObjectParent.position.copy(placePosition)
+    this.arObjectParent.scale.set(arScale, arScale, arScale)
+    
+    // Move mesh to AR parent (removes from original parent)
+    this.arObjectParent.add(mesh)
+    mesh.position.set(-center.x, -center.y, -center.z)
+    mesh.scale.set(1, 1, 1)
+    mesh.rotation.set(0, 0, 0)
+    mesh.visible = true
+    
+    // Add lights
+    const light = new THREE.DirectionalLight(0xffffff, 1)
+    light.position.set(1, 2, 1)
+    light.name = 'AR_LIGHT'
+    this.arObjectParent.add(light)
+    
+    const ambient = new THREE.AmbientLight(0xffffff, 0.5)
+    ambient.name = 'AR_AMBIENT'
+    this.arObjectParent.add(ambient)
+    
+    this.scene.add(this.arObjectParent)
+    this.arObject = mesh
 
-    // Reset object transform and add to AR parent
-    this.arObject.position.set(0, 0, 0)
-    this.arObject.rotation.set(0, 0, 0)
-    this.arObject.scale.set(0.1, 0.1, 0.1) // Start small in AR
-    this.arObjectParent.add(this.arObject)
-
-    // Hide reticle
-    this.reticle.visible = false
+    // Hide reticle if it exists
+    if (this.reticle) {
+      this.reticle.visible = false
+    }
     this.isPlaced = true
 
-    console.info('[ARController] Object placed in AR')
+    this.debug(`Placed at ${placePosition.x.toFixed(2)},${placePosition.y.toFixed(2)},${placePosition.z.toFixed(2)} scale:${arScale.toFixed(4)}`)
     return true
+  }
+
+  placeObjectAtOrigin(): void {
+    this.debug(`placeObjectAtOrigin scene:${!!this.scene}`)
+    
+    if (!this.scene) {
+      this.debug('ERROR: No scene!')
+      return
+    }
+    
+    // Find the sculpture mesh - use ORIGINAL, don't clone
+    const mesh = this.scene.getObjectByName('DEBUG_LOFT_MESH') as THREE.Mesh | null
+    if (!mesh) {
+      this.debug('ERROR: No sculpture mesh!')
+      return
+    }
+    
+    // Store original state for restoration
+    this.originalMesh = mesh
+    this.originalMeshParent = mesh.parent
+    this.originalPosition.copy(mesh.position)
+    this.originalRotation.copy(mesh.rotation)
+    this.originalScale.copy(mesh.scale)
+    this.originalVisible = mesh.visible
+    
+    // Calculate scale to fit in 75cm
+    mesh.geometry.computeBoundingBox()
+    const box = mesh.geometry.boundingBox!
+    const size = new THREE.Vector3()
+    box.getSize(size)
+    const center = new THREE.Vector3()
+    box.getCenter(center)
+    
+    const maxDim = Math.max(size.x, size.y, size.z)
+    const targetSize = 0.75 // 75cm
+    const arScale = maxDim > 0 ? targetSize / maxDim : 0.01
+    
+    this.debug(`Size:${maxDim.toFixed(1)} Scale:${arScale.toFixed(4)}`)
+    
+    // Create parent group for gestures
+    this.arObjectParent = new THREE.Group()
+    this.arObjectParent.name = 'AR_PARENT_GROUP'
+    this.arObjectParent.position.set(0, 0, -0.5) // 0.5m in front
+    this.arObjectParent.scale.set(arScale, arScale, arScale)
+    
+    // Move mesh to AR parent (removes from original parent)
+    this.arObjectParent.add(mesh)
+    mesh.position.set(-center.x, -center.y, -center.z)
+    mesh.scale.set(1, 1, 1)
+    mesh.rotation.set(0, 0, 0)
+    mesh.visible = true
+    
+    // Add lights for the sculpture
+    const light = new THREE.DirectionalLight(0xffffff, 1)
+    light.position.set(1, 2, 1)
+    light.name = 'AR_LIGHT'
+    this.arObjectParent.add(light)
+    
+    const ambient = new THREE.AmbientLight(0xffffff, 0.5)
+    ambient.name = 'AR_AMBIENT'
+    this.arObjectParent.add(ambient)
+    
+    this.scene.add(this.arObjectParent)
+    this.arObject = mesh
+    
+    this.isPlaced = true
+    this.debug(`Sculpture placed`)
   }
 
   private setupGestureHandlers(): void {
@@ -186,6 +386,14 @@ export class ARController {
   }
 
   private onTouchStart(event: TouchEvent): void {
+    this.debug(`Touch: ${event.touches.length} fingers, placed:${this.isPlaced}`)
+    
+    // If not placed yet, try to place on single tap
+    if (!this.isPlaced && event.touches.length === 1) {
+      this.placeObject()
+      return
+    }
+    
     if (!this.isPlaced || !this.arObjectParent) return
 
     for (let i = 0; i < event.touches.length; i++) {
@@ -199,6 +407,7 @@ export class ARController {
       const dy = event.touches[0].clientY - event.touches[1].clientY
       this.initialPinchDistance = Math.sqrt(dx * dx + dy * dy)
       this.initialScale = this.arObjectParent.scale.x
+      this.debug(`Pinch start, dist:${this.initialPinchDistance.toFixed(0)}`)
     }
   }
 
@@ -269,21 +478,40 @@ export class ARController {
   }
 
   private onSessionEnd(): void {
-    console.info('[ARController] AR session ended')
+    this.debug('Cleaning up AR session')
     
-    // Restore object to original state
-    if (this.arObject && this.originalParent) {
-      this.originalParent.add(this.arObject)
-      this.arObject.position.copy(this.originalPosition)
-      this.arObject.rotation.copy(this.originalRotation)
-      this.arObject.scale.copy(this.originalScale)
+    // Restore original mesh to its original parent and state
+    if (this.originalMesh && this.originalMeshParent) {
+      this.debug('Restoring original mesh to original parent')
+      
+      // Move mesh back to original parent
+      this.originalMeshParent.add(this.originalMesh)
+      
+      // Restore original transforms
+      this.originalMesh.position.copy(this.originalPosition)
+      this.originalMesh.rotation.copy(this.originalRotation)
+      this.originalMesh.scale.copy(this.originalScale)
+      this.originalMesh.visible = this.originalVisible
+      
+      this.debug('Original mesh restored')
     }
-
-    // Cleanup AR parent
-    if (this.arObjectParent) {
-      this.scene?.remove(this.arObjectParent)
+    
+    // Remove AR parent group (just contains lights now, mesh was moved back)
+    if (this.arObjectParent && this.scene) {
+      // Dispose lights
+      this.arObjectParent.traverse((child) => {
+        if (child instanceof THREE.Light) {
+          child.dispose?.()
+        }
+      })
+      this.scene.remove(this.arObjectParent)
       this.arObjectParent = null
     }
+    
+    // Reset mesh references
+    this.originalMesh = null
+    this.originalMeshParent = null
+    this.arObject = null
 
     // Cleanup reticle
     if (this.reticle) {
@@ -306,15 +534,68 @@ export class ARController {
     this.initialTouchPositions.clear()
 
     if (this.renderer) {
+      // Stop the XR animation loop
+      this.renderer.setAnimationLoop(null)
       this.renderer.xr.enabled = false
+      
+      // Reset renderer settings for normal 3js rendering
+      this.renderer.setClearColor(0x0a0a0a, 1)
+      this.renderer.setClearAlpha(1)
     }
+    
+    // Remove AR objects by stored UUIDs - most reliable method
+    if (this.scene && this.arObjectUUIDs.length > 0) {
+      this.debug(`Removing ${this.arObjectUUIDs.length} tracked AR objects by UUID`)
+      
+      for (const uuid of this.arObjectUUIDs) {
+        const obj = this.scene.getObjectByProperty('uuid', uuid)
+        if (obj) {
+          this.debug(`Found and removing UUID: ${uuid}`)
+          // Dispose meshes
+          obj.traverse((c) => {
+            if (c instanceof THREE.Mesh) {
+              c.geometry?.dispose()
+              if (c.material instanceof THREE.Material) c.material.dispose()
+            }
+          })
+          this.scene.remove(obj)
+        } else {
+          this.debug(`UUID not found in scene: ${uuid}`)
+        }
+      }
+      this.arObjectUUIDs = []
+    }
+    
+    // Also do a final pass to remove any objects with AR_ prefix names
+    if (this.scene) {
+      const children = [...this.scene.children]
+      for (const child of children) {
+        if (child.name?.startsWith('AR_') || (child instanceof THREE.Group && child.scale.x < 0.1 && child.scale.x > 0)) {
+          this.debug(`Final cleanup: removing ${child.type} name="${child.name}"`)
+          this.scene.remove(child)
+        }
+      }
+    }
+    
+    this.debug('AR cleanup complete')
 
     this.config.onSessionEnd?.()
+    this.config.onSceneReset?.()
   }
 
   async endARSession(): Promise<void> {
+    this.debug('Exit AR requested')
     if (this.xrSession) {
-      await this.xrSession.end()
+      try {
+        await this.xrSession.end()
+      } catch (e) {
+        this.debug(`Session end error: ${e}`)
+        // Force cleanup even if session.end() fails
+        this.onSessionEnd()
+      }
+    } else {
+      // No session but cleanup anyway
+      this.onSessionEnd()
     }
   }
 
