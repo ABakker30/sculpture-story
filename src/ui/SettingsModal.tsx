@@ -70,13 +70,14 @@ export function SettingsModal({
   const [loadingPBR, setLoadingPBR] = useState(false)
   const [activePBR, setActivePBR] = useState<string | null>(null)
   const [materialTab, setMaterialTab] = useState<'properties' | 'pbr'>('properties')
+  const isDev = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
 
   useEffect(() => {
     if (isOpen) {
       setEnvironments(lightingController.getEnvironments())
       setCurrentEnvIndex(lightingController.getCurrentEnvironmentIndex())
       setMaterialConfig(materialController.getConfig())
-      fetchPBRFiles()
+      if (isDev) fetchPBRFiles()
     }
   }, [isOpen])
 
@@ -272,10 +273,12 @@ export function SettingsModal({
 
         {activeTab === 'material' && (
           <div style={styles.section}>
-            <div style={styles.subTabs}>
-              <button style={{ ...styles.subTab, ...(materialTab === 'properties' ? styles.subTabActive : {}) }} onClick={() => setMaterialTab('properties')}>Props</button>
-              <button style={{ ...styles.subTab, ...(materialTab === 'pbr' ? styles.subTabActive : {}) }} onClick={() => setMaterialTab('pbr')}>PBR</button>
-            </div>
+            {isDev && (
+              <div style={styles.subTabs}>
+                <button style={{ ...styles.subTab, ...(materialTab === 'properties' ? styles.subTabActive : {}) }} onClick={() => setMaterialTab('properties')}>Props</button>
+                <button style={{ ...styles.subTab, ...(materialTab === 'pbr' ? styles.subTabActive : {}) }} onClick={() => setMaterialTab('pbr')}>PBR</button>
+              </div>
+            )}
             {materialTab === 'properties' && (
               <>
                 <label style={styles.label}>Preset</label>
