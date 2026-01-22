@@ -101,6 +101,7 @@ export function SettingsModal({
 
   // Camera handlers
   const updateCameraSetting = <K extends keyof CameraAnimationSettings>(key: K, value: CameraAnimationSettings[K]) => {
+    console.log(`[Settings] Camera.${key} = ${JSON.stringify(value)}`)
     const newSettings = { ...cameraSettings, [key]: value }
     setCameraSettings(newSettings)
     onCameraSettingsChange?.(newSettings)
@@ -114,6 +115,7 @@ export function SettingsModal({
 
   // Lighting handlers
   const handleLightingChange = (key: keyof LightingConfig, value: number | boolean) => {
+    console.log(`[Settings] Lighting.${key} = ${value}`)
     const newConfig = { ...lightingConfig, [key]: value }
     setLightingConfig(newConfig)
     switch (key) {
@@ -136,6 +138,7 @@ export function SettingsModal({
 
   // Material handlers
   const handleMaterialChange = (key: keyof MaterialConfig, value: number | string) => {
+    console.log(`[Settings] Material.${key} = ${value}`)
     const newConfig = { ...materialConfig, [key]: value }
     setMaterialConfig(newConfig)
     switch (key) {
@@ -376,7 +379,7 @@ const styles: Record<string, React.CSSProperties> = {
   select: {
     width: '100%',
     padding: '6px',
-    background: 'rgba(255,255,255,0.1)',
+    background: '#222',
     border: '1px solid rgba(255,255,255,0.2)',
     borderRadius: '4px',
     color: '#fff',

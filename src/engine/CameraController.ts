@@ -53,7 +53,7 @@ class CameraController {
     const maxDim = Math.max(size.x, size.y, size.z)
 
     const fov = this.camera.fov * (Math.PI / 180)
-    const distance = maxDim / (2 * Math.tan(fov / 2)) * 1.5
+    const distance = maxDim / (2 * Math.tan(fov / 2)) * 1.0
 
     this.config.minDistance = distance * 0.3
     this.config.maxDistance = distance * 5

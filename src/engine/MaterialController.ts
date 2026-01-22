@@ -24,10 +24,10 @@ export interface MaterialConfig {
 }
 
 const DEFAULT_CONFIG: MaterialConfig = {
-  color: '#c0c0c0',
-  metalness: 0.95,
-  roughness: 0.25,
-  clearcoat: 0.3,
+  color: '#c8c8c8',
+  metalness: 1,
+  roughness: 0.07,
+  clearcoat: 0.5,
   clearcoatRoughness: 0.1,
   transmission: 0,
   opacity: 1.0,
@@ -39,9 +39,9 @@ const DEFAULT_CONFIG: MaterialConfig = {
 const PRESETS: Record<string, Partial<MaterialConfig>> = {
   stainlessSteel: {
     color: '#c8c8c8',
-    metalness: 0.95,
-    roughness: 0.2,
-    clearcoat: 0.4,
+    metalness: 1,
+    roughness: 0.07,
+    clearcoat: 0.5,
     clearcoatRoughness: 0.1,
     transmission: 0,
     opacity: 1.0,

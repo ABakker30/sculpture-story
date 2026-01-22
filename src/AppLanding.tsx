@@ -11,7 +11,6 @@ import materialController from './engine/MaterialController'
 import cameraController from './engine/CameraController'
 import { computeHullCameraPositions, createHullGeometry, CameraViewpoint } from './engine/ConvexHullCamera'
 import { isWebGPUSupported, getRendererInfo } from './engine/RendererFactory'
-import presetCapture from './engine/PresetCapture'
 import modeController, { AppMode } from './engine/ModeController'
 
 import { SettingsModal, CameraAnimationSettings } from './ui/SettingsModal'
@@ -1273,6 +1272,7 @@ function LoadingIndicator() {
 export function AppLanding() {
   const [settingsModalOpen, setSettingsModalOpen] = useState(false)
   const [debugPanelOpen, setDebugPanelOpen] = useState(false)
+  const [menuOpen, setMenuOpen] = useState(false)
   const [showHull, setShowHull] = useState(false)
   const [_cameraAnimSettings, setCameraAnimSettings] = useState<CameraAnimationSettings>({
     duration: 30,
@@ -1300,7 +1300,7 @@ export function AppLanding() {
   const [galaxySize, setGalaxySize] = useState(4)
   const [cameraViewpoint, setCameraViewpoint] = useState(-1)
   const [cameraViewpoints, setCameraViewpoints] = useState<CameraViewpoint[]>([])
-  const [lensLength, setLensLength] = useState(50) // mm equivalent
+  const [lensLength, setLensLength] = useState(100) // mm equivalent
   const [webgpuSupported, setWebgpuSupported] = useState<boolean | null>(null)
   const [rendererInfo, setRendererInfo] = useState<{ vendor: string; renderer: string; webglVersion: string } | null>(null)
   const [debugMode] = useState(true)
@@ -1326,10 +1326,6 @@ export function AppLanding() {
     const newValue = !autoRotate
     setAutoRotate(newValue)
     cameraController.setAutoRotate(newValue)
-  }
-
-  const handleCopyPreset = () => {
-    presetCapture.copyPresetToClipboard('Custom Preset')
   }
 
   const handlePlayCameraAnimation = (settings: CameraAnimationSettings) => {
@@ -1432,7 +1428,7 @@ export function AppLanding() {
   return (
     <div style={styles.container}>
       <Canvas
-        camera={{ position: [20, 15, 20], fov: cameraFov, near: 0.5, far: 500 }}
+        camera={{ position: [40, 30, 40], fov: cameraFov, near: 0.5, far: 1000 }}
         gl={{ 
           antialias: true, 
           toneMapping: THREE.ACESFilmicToneMapping,
@@ -1484,7 +1480,7 @@ export function AppLanding() {
                 max={1}
                 step={0.01}
                 value={loftProgress}
-                onChange={(e) => setLoftProgress(parseFloat(e.target.value))}
+                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] loftProgress = ${v}`); setLoftProgress(v); }}
                 style={{ flex: 1 }}
               />
               <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Core</span>
@@ -1504,7 +1500,7 @@ export function AppLanding() {
                 max={1}
                 step={0.01}
                 value={straighten}
-                onChange={(e) => setStraighten(parseFloat(e.target.value))}
+                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] straighten = ${v}`); setStraighten(v); }}
                 style={{ flex: 1 }}
               />
               <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Stick</span>
@@ -1524,7 +1520,7 @@ export function AppLanding() {
                 max={0.5}
                 step={0.01}
                 value={sphereRadius}
-                onChange={(e) => setSphereRadius(parseFloat(e.target.value))}
+                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] sphereRadius = ${v}`); setSphereRadius(v); }}
                 style={{ flex: 1 }}
               />
               <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Large</span>
@@ -1544,7 +1540,7 @@ export function AppLanding() {
                 max={1}
                 step={0.01}
                 value={starDensity}
-                onChange={(e) => setStarDensity(parseFloat(e.target.value))}
+                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] starDensity = ${v}`); setStarDensity(v); }}
                 style={{ flex: 1 }}
               />
               <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Max</span>
@@ -1564,7 +1560,7 @@ export function AppLanding() {
                 max={10}
                 step={0.5}
                 value={galaxySize}
-                onChange={(e) => setGalaxySize(parseFloat(e.target.value))}
+                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] galaxySize = ${v}`); setGalaxySize(v); }}
                 style={{ flex: 1 }}
               />
               <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>10x</span>
@@ -1584,7 +1580,7 @@ export function AppLanding() {
                 max={1}
                 step={0.01}
                 value={starScale}
-                onChange={(e) => setStarScale(parseFloat(e.target.value))}
+                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] starScale = ${v}`); setStarScale(v); }}
                 style={{ flex: 1 }}
               />
               <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Touch</span>
@@ -1604,7 +1600,7 @@ export function AppLanding() {
                 max={1}
                 step={0.01}
                 value={cosmicScale}
-                onChange={(e) => setCosmicScale(parseFloat(e.target.value))}
+                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] cosmicScale = ${v}`); setCosmicScale(v); }}
                 style={{ flex: 1 }}
               />
               <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Atomic</span>
@@ -1624,7 +1620,7 @@ export function AppLanding() {
                 max={1}
                 step={0.01}
                 value={bondDensity}
-                onChange={(e) => setBondDensity(parseFloat(e.target.value))}
+                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] bondDensity = ${v}`); setBondDensity(v); }}
                 style={{ flex: 1 }}
               />
               <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Full</span>
@@ -1644,7 +1640,7 @@ export function AppLanding() {
                 max={1.25}
                 step={0.005}
                 value={rotateSpeed}
-                onChange={(e) => setRotateSpeed(parseFloat(e.target.value))}
+                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] rotateSpeed = ${v}`); setRotateSpeed(v); }}
                 style={{ flex: 1 }}
               />
               <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Fast</span>
@@ -1665,7 +1661,7 @@ export function AppLanding() {
                   max={cameraViewpoints.length - 1}
                   step={1}
                   value={cameraViewpoint}
-                  onChange={(e) => setCameraViewpoint(parseInt(e.target.value))}
+                  onChange={(e) => { const v = parseInt(e.target.value); console.log(`[Tools] cameraViewpoint = ${v}`); setCameraViewpoint(v); }}
                   style={{ flex: 1 }}
                 />
                 <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>{cameraViewpoints.length}</span>
@@ -1693,7 +1689,7 @@ export function AppLanding() {
                 max={300}
                 step={5}
                 value={lensLength}
-                onChange={(e) => setLensLength(parseFloat(e.target.value))}
+                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] lensLength = ${v}`); setLensLength(v); }}
                 style={{ flex: 1 }}
               />
               <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>300mm</span>
@@ -1706,38 +1702,49 @@ export function AppLanding() {
         </div>
       )}
 
-      <div style={styles.toolbar}>
+      {/* 3-dot menu top right */}
+      <div style={styles.menuContainer}>
         <button
-          style={{ ...styles.toolbarButton, background: settingsModalOpen ? '#4488ff' : undefined }}
-          onClick={() => setSettingsModalOpen(!settingsModalOpen)}
-          title="Settings"
+          style={styles.menuButton}
+          onClick={() => setMenuOpen(!menuOpen)}
+          title="Menu"
         >
-          ⚙️
+          <svg width="20" height="20" viewBox="0 0 20 20" fill="currentColor">
+            <circle cx="10" cy="4" r="2" />
+            <circle cx="10" cy="10" r="2" />
+            <circle cx="10" cy="16" r="2" />
+          </svg>
         </button>
-        <button
-          style={{ ...styles.toolbarButton, background: autoRotate ? '#4488ff' : undefined }}
-          onClick={handleAutoRotateToggle}
-          title="Auto Rotate"
-        >
-          🔄
-        </button>
-        <button
-          style={styles.toolbarButton}
-          onClick={handleCopyPreset}
-          title="Copy Preset to Clipboard"
-        >
-          📋
-        </button>
-        {debugMode && (
-          <button
-            style={{ ...styles.toolbarButton, background: debugPanelOpen ? '#4488ff' : undefined }}
-            onClick={() => setDebugPanelOpen(!debugPanelOpen)}
-            title="Debug Controls"
-          >
-            🛠️
-          </button>
+        {menuOpen && (
+          <div style={styles.dropdown}>
+            <button
+              style={styles.dropdownItem}
+              onClick={() => { setSettingsModalOpen(true); setMenuOpen(false); }}
+            >
+              Settings
+            </button>
+            {debugMode && (
+              <button
+                style={styles.dropdownItem}
+                onClick={() => { setDebugPanelOpen(!debugPanelOpen); setMenuOpen(false); }}
+              >
+                Tools
+              </button>
+            )}
+          </div>
         )}
       </div>
+
+      {/* Auto-rotate triangle button bottom right */}
+      <button
+        style={{ ...styles.autoRotateButton, background: autoRotate ? '#4488ff' : 'rgba(0,0,0,0.7)' }}
+        onClick={handleAutoRotateToggle}
+        title="Auto Rotate"
+      >
+        <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
+          <path d="M8 5v14l11-7z" />
+        </svg>
+      </button>
 
       <SettingsModal
         isOpen={settingsModalOpen}
@@ -1758,21 +1765,54 @@ const styles: Record<string, React.CSSProperties> = {
     height: '100%',
     position: 'relative',
   },
-  toolbar: {
+  menuContainer: {
     position: 'absolute',
     top: '20px',
     right: '20px',
-    display: 'flex',
-    gap: '4px',
   },
-  toolbarButton: {
+  menuButton: {
     width: '44px',
     height: '44px',
     borderRadius: '8px',
     border: 'none',
     background: 'rgba(0,0,0,0.7)',
     color: '#fff',
-    fontSize: '20px',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
+    backdropFilter: 'blur(10px)',
+  },
+  dropdown: {
+    position: 'absolute',
+    top: '50px',
+    right: '0',
+    background: 'rgba(0,0,0,0.9)',
+    borderRadius: '8px',
+    padding: '8px 0',
+    minWidth: '140px',
+    backdropFilter: 'blur(10px)',
+  },
+  dropdownItem: {
+    width: '100%',
+    padding: '10px 16px',
+    border: 'none',
+    background: 'transparent',
+    color: '#fff',
+    fontSize: '14px',
+    textAlign: 'left' as const,
+    cursor: 'pointer',
+    fontFamily: 'sans-serif',
+  },
+  autoRotateButton: {
+    position: 'absolute',
+    bottom: '20px',
+    right: '20px',
+    width: '48px',
+    height: '48px',
+    borderRadius: '50%',
+    border: 'none',
+    color: '#fff',
     cursor: 'pointer',
     display: 'flex',
     alignItems: 'center',

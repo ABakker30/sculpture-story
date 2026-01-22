@@ -19,15 +19,15 @@ export interface LightingConfig {
 }
 
 const DEFAULT_CONFIG: LightingConfig = {
-  environmentIntensity: 0.5,
+  environmentIntensity: 1.2,
   showBackground: false,
   ambientIntensity: 0.2,
-  keyLightIntensity: 1.0,
+  keyLightIntensity: 1,
   keyLightAzimuth: 45,
   keyLightElevation: 45,
-  fillLightIntensity: 0.3,
+  fillLightIntensity: 0.5,
   rimLightEnabled: true,
-  rimLightIntensity: 0.5,
+  rimLightIntensity: 1,
 }
 
 const BUILT_IN_ENVIRONMENTS: HDREnvironment[] = [
