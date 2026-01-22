@@ -70,14 +70,13 @@ export function SettingsModal({
   const [loadingPBR, setLoadingPBR] = useState(false)
   const [activePBR, setActivePBR] = useState<string | null>(null)
   const [materialTab, setMaterialTab] = useState<'properties' | 'pbr'>('properties')
-  const isDev = window.location.hostname === 'localhost' || window.location.hostname === '127.0.0.1'
 
   useEffect(() => {
     if (isOpen) {
       setEnvironments(lightingController.getEnvironments())
       setCurrentEnvIndex(lightingController.getCurrentEnvironmentIndex())
       setMaterialConfig(materialController.getConfig())
-      if (isDev) fetchPBRFiles()
+      fetchPBRFiles()
     }
   }, [isOpen])
 
@@ -168,7 +167,7 @@ export function SettingsModal({
         setPbrFiles(files.map(f => ({ name: f.replace('.zip', ''), path: getPath(f) })))
       }
     } catch {
-      const knownFiles = ['FabricTarpPlastic001.zip', 'MarbleCarraraHoned001.zip', 'MetalMachiningRadial001.zip']
+      const knownFiles = ['crema_cenia_marble_tgykfepc_2k.zip', 'FabricTarpPlastic001.zip', 'MarbleCarraraHoned001.zip', 'MetalMachiningRadial001.zip']
       setPbrFiles(knownFiles.map(f => ({ name: f.replace('.zip', ''), path: getPath(f) })))
     }
   }
@@ -273,12 +272,10 @@ export function SettingsModal({
 
         {activeTab === 'material' && (
           <div style={styles.section}>
-            {isDev && (
-              <div style={styles.subTabs}>
-                <button style={{ ...styles.subTab, ...(materialTab === 'properties' ? styles.subTabActive : {}) }} onClick={() => setMaterialTab('properties')}>Props</button>
-                <button style={{ ...styles.subTab, ...(materialTab === 'pbr' ? styles.subTabActive : {}) }} onClick={() => setMaterialTab('pbr')}>PBR</button>
-              </div>
-            )}
+            <div style={styles.subTabs}>
+              <button style={{ ...styles.subTab, ...(materialTab === 'properties' ? styles.subTabActive : {}) }} onClick={() => setMaterialTab('properties')}>Props</button>
+              <button style={{ ...styles.subTab, ...(materialTab === 'pbr' ? styles.subTabActive : {}) }} onClick={() => setMaterialTab('pbr')}>PBR</button>
+            </div>
             {materialTab === 'properties' && (
               <>
                 <label style={styles.label}>Preset</label>
