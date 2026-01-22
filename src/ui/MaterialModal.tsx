@@ -35,11 +35,7 @@ export function MaterialModal({ isOpen, onClose }: MaterialModalProps) {
   }, [isOpen])
 
   const fetchPBRFiles = async () => {
-    // Use local paths for development, GitHub LFS for production (Netlify)
-    const isProduction = window.location.hostname !== 'localhost' && window.location.hostname !== '127.0.0.1'
-    const GITHUB_LFS_BASE = 'https://raw.githubusercontent.com/ABakker30/sculpture-story/master/public/PBR'
-    
-    const getPath = (filename: string) => isProduction ? `${GITHUB_LFS_BASE}/${filename}` : `/PBR/${filename}`
+    const getPath = (filename: string) => `/PBR/${filename}`
     
     try {
       // Fetch manifest from local (small file, not in LFS)
