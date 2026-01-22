@@ -1332,7 +1332,10 @@ export function AppLanding() {
       onError: (err) => console.error('[AR] Error:', err)
     })
     arControllerRef.current = arController
-    arController.isARSupported().then(setArSupported)
+    arController.isARSupported().then((supported) => {
+      console.info(`[AR] Support check result: ${supported}, navigator.xr exists: ${!!navigator.xr}`)
+      setArSupported(supported)
+    })
   }, [])
 
   const handleEnterAR = async () => {
