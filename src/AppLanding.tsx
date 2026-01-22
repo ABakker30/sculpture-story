@@ -1415,9 +1415,9 @@ export function AppLanding() {
   // AR state
   const [arSupported, setArSupported] = useState(false)
   const [arActive, setArActive] = useState(false)
-  const [arDebug, setArDebug] = useState<string[]>(['Initializing AR...'])
+  const [, setArDebug] = useState<string[]>(['Initializing AR...'])
   const arControllerRef = useRef<ARController | null>(null)
-  const [sceneResetTrigger, setSceneResetTrigger] = useState(0)
+  const [sceneResetTrigger] = useState(0)
   
   // Convert lens mm to FOV: fov = 2 * atan(36 / (2 * lens_mm)) * (180/PI)
   const cameraFov = 2 * Math.atan(36 / (2 * lensLength)) * (180 / Math.PI)

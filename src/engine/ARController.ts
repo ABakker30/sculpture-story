@@ -16,10 +16,9 @@ export class ARController {
   private xrRefSpace: XRReferenceSpace | null = null
   private config: ARControllerConfig
   
-  // AR object (the sculpture group)
-  private arObject: THREE.Object3D | null = null
-  private arObjectParent: THREE.Object3D | null = null
-  private arObjectUUIDs: string[] = [] // Track UUIDs of AR objects for cleanup
+  // AR object parent group
+  private _arObjectParent: THREE.Object3D | null = null
+  private _arObjectUUIDs: string[] = [] // Track UUIDs of AR objects for cleanup
   
   // Gesture state
   private initialPinchDistance: number = 0
@@ -76,7 +75,6 @@ export class ARController {
   // Camera is managed by WebXR during AR session
 
   setARObject(object: THREE.Object3D): void {
-    this.arObject = object
     // Store original transform
     this.originalMeshParent = object.parent
     this.originalPosition.copy(object.position)
@@ -267,13 +265,13 @@ export class ARController {
     const arScale = maxDim > 0 ? targetSize / maxDim : 0.01
 
     // Create parent group at placement position
-    this.arObjectParent = new THREE.Group()
-    this.arObjectParent.name = 'AR_PARENT_GROUP'
-    this.arObjectParent.position.copy(placePosition)
-    this.arObjectParent.scale.set(arScale, arScale, arScale)
+    this._arObjectParent = new THREE.Group()
+    this._arObjectParent.name = 'AR_PARENT_GROUP'
+    this._arObjectParent.position.copy(placePosition)
+    this._arObjectParent.scale.set(arScale, arScale, arScale)
     
     // Move mesh to AR parent (removes from original parent)
-    this.arObjectParent.add(mesh)
+    this._arObjectParent.add(mesh)
     mesh.position.set(-center.x, -center.y, -center.z)
     mesh.scale.set(1, 1, 1)
     mesh.rotation.set(0, 0, 0)
@@ -283,14 +281,13 @@ export class ARController {
     const light = new THREE.DirectionalLight(0xffffff, 1)
     light.position.set(1, 2, 1)
     light.name = 'AR_LIGHT'
-    this.arObjectParent.add(light)
+    this._arObjectParent.add(light)
     
     const ambient = new THREE.AmbientLight(0xffffff, 0.5)
     ambient.name = 'AR_AMBIENT'
-    this.arObjectParent.add(ambient)
+    this._arObjectParent.add(ambient)
     
-    this.scene.add(this.arObjectParent)
-    this.arObject = mesh
+    this.scene.add(this._arObjectParent)
 
     // Hide reticle if it exists
     if (this.reticle) {
@@ -340,13 +337,13 @@ export class ARController {
     this.debug(`Size:${maxDim.toFixed(1)} Scale:${arScale.toFixed(4)}`)
     
     // Create parent group for gestures
-    this.arObjectParent = new THREE.Group()
-    this.arObjectParent.name = 'AR_PARENT_GROUP'
-    this.arObjectParent.position.set(0, 0, -0.5) // 0.5m in front
-    this.arObjectParent.scale.set(arScale, arScale, arScale)
+    this._arObjectParent = new THREE.Group()
+    this._arObjectParent.name = 'AR_PARENT_GROUP'
+    this._arObjectParent.position.set(0, 0, -0.5) // 0.5m in front
+    this._arObjectParent.scale.set(arScale, arScale, arScale)
     
     // Move mesh to AR parent (removes from original parent)
-    this.arObjectParent.add(mesh)
+    this._arObjectParent.add(mesh)
     mesh.position.set(-center.x, -center.y, -center.z)
     mesh.scale.set(1, 1, 1)
     mesh.rotation.set(0, 0, 0)
@@ -356,14 +353,13 @@ export class ARController {
     const light = new THREE.DirectionalLight(0xffffff, 1)
     light.position.set(1, 2, 1)
     light.name = 'AR_LIGHT'
-    this.arObjectParent.add(light)
+    this._arObjectParent.add(light)
     
     const ambient = new THREE.AmbientLight(0xffffff, 0.5)
     ambient.name = 'AR_AMBIENT'
-    this.arObjectParent.add(ambient)
+    this._arObjectParent.add(ambient)
     
-    this.scene.add(this.arObjectParent)
-    this.arObject = mesh
+    this.scene.add(this._arObjectParent)
     
     this.isPlaced = true
     this.debug(`Sculpture placed`)
@@ -394,7 +390,7 @@ export class ARController {
       return
     }
     
-    if (!this.isPlaced || !this.arObjectParent) return
+    if (!this.isPlaced || !this._arObjectParent) return
 
     for (let i = 0; i < event.touches.length; i++) {
       const touch = event.touches[i]
@@ -406,13 +402,13 @@ export class ARController {
       const dx = event.touches[0].clientX - event.touches[1].clientX
       const dy = event.touches[0].clientY - event.touches[1].clientY
       this.initialPinchDistance = Math.sqrt(dx * dx + dy * dy)
-      this.initialScale = this.arObjectParent.scale.x
+      this.initialScale = this._arObjectParent.scale.x
       this.debug(`Pinch start, dist:${this.initialPinchDistance.toFixed(0)}`)
     }
   }
 
   private onTouchMove(event: TouchEvent): void {
-    if (!this.isPlaced || !this.arObjectParent) return
+    if (!this.isPlaced || !this._arObjectParent) return
     event.preventDefault()
 
     if (event.touches.length === 1) {
@@ -422,8 +418,8 @@ export class ARController {
       if (initial) {
         const dx = (touch.clientX - initial.x) * 0.001
         const dz = (touch.clientY - initial.y) * 0.001
-        this.arObjectParent.position.x += dx
-        this.arObjectParent.position.z += dz
+        this._arObjectParent.position.x += dx
+        this._arObjectParent.position.z += dz
         this.initialTouchPositions.set(touch.identifier, { x: touch.clientX, y: touch.clientY })
       }
     } else if (event.touches.length === 2) {
@@ -440,7 +436,7 @@ export class ARController {
       if (this.initialPinchDistance > 0) {
         const scaleFactor = currentDistance / this.initialPinchDistance
         const newScale = Math.max(0.01, Math.min(2, this.initialScale * scaleFactor))
-        this.arObjectParent.scale.setScalar(newScale)
+        this._arObjectParent.scale.setScalar(newScale)
       }
 
       // Rotation (calculate angle between touches)
@@ -450,7 +446,7 @@ export class ARController {
         const initialAngle = Math.atan2(initial1.y - initial0.y, initial1.x - initial0.x)
         const currentAngle = Math.atan2(touch1.clientY - touch0.clientY, touch1.clientX - touch0.clientX)
         const deltaAngle = currentAngle - initialAngle
-        this.arObjectParent.rotation.y -= deltaAngle
+        this._arObjectParent.rotation.y -= deltaAngle
 
         // Update stored positions for next frame
         this.initialTouchPositions.set(touch0.identifier, { x: touch0.clientX, y: touch0.clientY })
@@ -497,21 +493,20 @@ export class ARController {
     }
     
     // Remove AR parent group (just contains lights now, mesh was moved back)
-    if (this.arObjectParent && this.scene) {
+    if (this._arObjectParent && this.scene) {
       // Dispose lights
-      this.arObjectParent.traverse((child) => {
+      this._arObjectParent.traverse((child) => {
         if (child instanceof THREE.Light) {
           child.dispose?.()
         }
       })
-      this.scene.remove(this.arObjectParent)
-      this.arObjectParent = null
+      this.scene.remove(this._arObjectParent)
+      this._arObjectParent = null
     }
     
     // Reset mesh references
     this.originalMesh = null
     this.originalMeshParent = null
-    this.arObject = null
 
     // Cleanup reticle
     if (this.reticle) {
@@ -544,10 +539,10 @@ export class ARController {
     }
     
     // Remove AR objects by stored UUIDs - most reliable method
-    if (this.scene && this.arObjectUUIDs.length > 0) {
-      this.debug(`Removing ${this.arObjectUUIDs.length} tracked AR objects by UUID`)
+    if (this.scene && this._arObjectUUIDs.length > 0) {
+      this.debug(`Removing ${this._arObjectUUIDs.length} tracked AR objects by UUID`)
       
-      for (const uuid of this.arObjectUUIDs) {
+      for (const uuid of this._arObjectUUIDs) {
         const obj = this.scene.getObjectByProperty('uuid', uuid)
         if (obj) {
           this.debug(`Found and removing UUID: ${uuid}`)
@@ -563,7 +558,7 @@ export class ARController {
           this.debug(`UUID not found in scene: ${uuid}`)
         }
       }
-      this.arObjectUUIDs = []
+      this._arObjectUUIDs = []
     }
     
     // Also do a final pass to remove any objects with AR_ prefix names
