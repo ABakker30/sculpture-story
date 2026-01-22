@@ -1774,18 +1774,18 @@ export function AppLanding() {
         </svg>
       </button>
 
-      {/* Enter AR button - only show if AR is supported */}
-      {arSupported && !arActive && (
+      {/* Enter AR button - always show for debugging */}
+      {!arActive && (
         <button
-          style={styles.arButton}
-          onClick={handleEnterAR}
-          title="Enter AR"
+          style={{ ...styles.arButton, opacity: arSupported ? 1 : 0.5 }}
+          onClick={arSupported ? handleEnterAR : undefined}
+          title={arSupported ? "Enter AR" : "AR not supported on this device"}
         >
           <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
             <path d="M3 4v6h2V6h4V4H3zm18 0h-6v2h4v4h2V4zM3 14v6h6v-2H5v-4H3zm18 0v4h-4v2h6v-6h-2z"/>
             <circle cx="12" cy="12" r="3"/>
           </svg>
-          <span style={{ marginLeft: '8px' }}>AR</span>
+          <span style={{ marginLeft: '8px' }}>{arSupported ? 'AR' : 'No AR'}</span>
         </button>
       )}
 
