@@ -332,9 +332,28 @@ class MaterialController {
     // Clear existing textures
     this.clearPBRTextures()
     
+    // Reset material to neutral PBR settings so textures control appearance
+    this.material.color.set('#ffffff')
+    this.material.metalness = textures.metalnessMap ? 1.0 : 0.0
+    this.material.roughness = textures.roughnessMap ? 1.0 : 0.5
+    this.material.clearcoat = 0
+    this.material.clearcoatRoughness = 0
+    this.material.transmission = 0
+    this.material.opacity = 1.0
+    this.material.transparent = false
+    
+    // Update config to reflect reset values
+    this.config.color = '#ffffff'
+    this.config.metalness = this.material.metalness
+    this.config.roughness = this.material.roughness
+    this.config.clearcoat = 0
+    this.config.clearcoatRoughness = 0
+    this.config.transmission = 0
+    this.config.opacity = 1.0
+    this.config.transparent = false
+    
     if (textures.map) {
       this.material.map = textures.map
-      this.material.color.set('#ffffff') // Use white base color when texture is present
     }
     if (textures.normalMap) {
       this.material.normalMap = textures.normalMap
@@ -342,11 +361,9 @@ class MaterialController {
     }
     if (textures.roughnessMap) {
       this.material.roughnessMap = textures.roughnessMap
-      this.material.roughness = 1.0 // Let the map control roughness
     }
     if (textures.metalnessMap) {
       this.material.metalnessMap = textures.metalnessMap
-      this.material.metalness = 1.0 // Let the map control metalness
     }
     if (textures.aoMap) {
       this.material.aoMap = textures.aoMap
