@@ -31,7 +31,7 @@ const DEFAULT_SETTINGS: CameraAnimationSettings = {
     face: true,
   },
   lookAhead: 0,
-  easing: 'easeInOut',
+  easing: 'linear',
   mode: 'smooth',
   loop: true,
 }
@@ -137,21 +137,27 @@ export function CameraAnimationModal({ isOpen, onClose, onSettingsChange, onPlay
             <label style={styles.label}>Speed</label>
             <input
               type="range"
-              min={0.5}
+              min={0}
               max={100}
-              step={0.5}
-              value={Math.round(600 / settings.duration * 10) / 10}
+              step={1}
+              value={(() => {
+                // Logarithmic scale: slider 0-100 maps to speed 0.01x-100x
+                const speed = 600 / settings.duration
+                return Math.round(Math.log10(speed * 100) / Math.log10(10000) * 100)
+              })()}
               onChange={(e) => {
-                const speed = parseFloat(e.target.value)
+                // Logarithmic scale: slider 0-100 maps to speed 0.01x-100x
+                const sliderVal = parseFloat(e.target.value)
+                const speed = Math.pow(10000, sliderVal / 100) / 100
                 const duration = Math.round(600 / speed)
-                updateSetting('duration', Math.max(6, Math.min(1200, duration)))
+                updateSetting('duration', Math.max(6, Math.min(60000, duration)))
               }}
               style={styles.slider}
             />
-            <span style={styles.value}>{(Math.round(600 / settings.duration * 10) / 10).toFixed(1)}x</span>
+            <span style={styles.value}>{(600 / settings.duration).toFixed(settings.duration > 600 ? 2 : 1)}x</span>
           </div>
           <div style={{ color: '#666', fontSize: '11px', marginTop: '4px' }}>
-            Duration: {settings.duration >= 60 ? `${(settings.duration / 60).toFixed(1)} min` : `${settings.duration} sec`}
+            Duration: {settings.duration >= 3600 ? `${(settings.duration / 3600).toFixed(1)} hr` : settings.duration >= 60 ? `${(settings.duration / 60).toFixed(1)} min` : `${settings.duration} sec`}
           </div>
           <label style={styles.checkboxLabel}>
             <input

@@ -14,9 +14,7 @@ import { isWebGPUSupported, getRendererInfo } from './engine/RendererFactory'
 import presetCapture from './engine/PresetCapture'
 import modeController, { AppMode } from './engine/ModeController'
 
-import LightingModal from './ui/LightingModal'
-import MaterialModal from './ui/MaterialModal'
-import CameraAnimationModal, { CameraAnimationSettings } from './ui/CameraAnimationModal'
+import { SettingsModal, CameraAnimationSettings } from './ui/SettingsModal'
 
 interface SmoothCameraAnimation {
   isActive: boolean
@@ -1273,16 +1271,14 @@ function LoadingIndicator() {
 }
 
 export function AppLanding() {
-  const [lightingModalOpen, setLightingModalOpen] = useState(false)
-  const [materialModalOpen, setMaterialModalOpen] = useState(false)
+  const [settingsModalOpen, setSettingsModalOpen] = useState(false)
   const [debugPanelOpen, setDebugPanelOpen] = useState(false)
   const [showHull, setShowHull] = useState(false)
-  const [cameraAnimModalOpen, setCameraAnimModalOpen] = useState(false)
   const [_cameraAnimSettings, setCameraAnimSettings] = useState<CameraAnimationSettings>({
     duration: 30,
     viewpointTypes: { corner: true, edge: true, face: true },
     lookAhead: 0,
-    easing: 'easeInOut',
+    easing: 'linear',
     mode: 'smooth',
     loop: true,
   })
@@ -1293,7 +1289,7 @@ export function AppLanding() {
   const [autoRotate, setAutoRotate] = useState(false)
   const [rotateSpeed, setRotateSpeed] = useState(0.5)
   const [mode, setMode] = useState<AppMode>(modeController.getMode())
-  const [sculptureLoaded, setSculptureLoaded] = useState(false)
+  const [_sculptureLoaded, setSculptureLoaded] = useState(false)
   const [loftProgress, setLoftProgress] = useState(0)
   const [straighten, setStraighten] = useState(0)
   const [sphereRadius, setSphereRadius] = useState(0)
@@ -1712,18 +1708,11 @@ export function AppLanding() {
 
       <div style={styles.toolbar}>
         <button
-          style={styles.toolbarButton}
-          onClick={() => setLightingModalOpen(true)}
-          title="Lighting Controls"
+          style={{ ...styles.toolbarButton, background: settingsModalOpen ? '#4488ff' : undefined }}
+          onClick={() => setSettingsModalOpen(!settingsModalOpen)}
+          title="Settings"
         >
-          💡
-        </button>
-        <button
-          style={styles.toolbarButton}
-          onClick={() => setMaterialModalOpen(true)}
-          title="Material Controls"
-        >
-          🎨
+          ⚙️
         </button>
         <button
           style={{ ...styles.toolbarButton, background: autoRotate ? '#4488ff' : undefined }}
@@ -1739,13 +1728,6 @@ export function AppLanding() {
         >
           📋
         </button>
-        <button
-          style={styles.toolbarButton}
-          onClick={() => setCameraAnimModalOpen(true)}
-          title="Camera Animation"
-        >
-          🎬
-        </button>
         {debugMode && (
           <button
             style={{ ...styles.toolbarButton, background: debugPanelOpen ? '#4488ff' : undefined }}
@@ -1757,31 +1739,12 @@ export function AppLanding() {
         )}
       </div>
 
-      <div style={styles.info}>
-        <h2 style={styles.infoTitle}>Sculpture Story</h2>
-        {sculptureLoaded ? (
-          <p style={styles.infoText}>Orbit to explore • Use controls to experiment</p>
-        ) : (
-          <p style={styles.infoText}>Loading sculpture...</p>
-        )}
-      </div>
-
-      <LightingModal
-        isOpen={lightingModalOpen}
-        onClose={() => setLightingModalOpen(false)}
-      />
-
-      <MaterialModal
-        isOpen={materialModalOpen}
-        onClose={() => setMaterialModalOpen(false)}
-      />
-
-      <CameraAnimationModal
-        isOpen={cameraAnimModalOpen}
-        onClose={() => setCameraAnimModalOpen(false)}
-        onSettingsChange={setCameraAnimSettings}
-        onPlay={handlePlayCameraAnimation}
-        isPlaying={cameraAnimPlaying}
+      <SettingsModal
+        isOpen={settingsModalOpen}
+        onClose={() => setSettingsModalOpen(false)}
+        onCameraSettingsChange={setCameraAnimSettings}
+        onCameraPlay={handlePlayCameraAnimation}
+        isCameraPlaying={cameraAnimPlaying}
         showHull={showHull}
         onShowHullChange={setShowHull}
       />
@@ -1816,23 +1779,6 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'center',
     backdropFilter: 'blur(10px)',
     transition: 'background 0.2s',
-  },
-  info: {
-    position: 'absolute',
-    bottom: '30px',
-    left: '30px',
-  },
-  infoTitle: {
-    margin: 0,
-    fontSize: '28px',
-    fontWeight: 300,
-    color: '#fff',
-    letterSpacing: '2px',
-  },
-  infoText: {
-    margin: '8px 0 0 0',
-    fontSize: '14px',
-    color: '#888',
   },
   storyModePlaceholder: {
     width: '100%',
