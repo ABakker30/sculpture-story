@@ -4,7 +4,7 @@ import basicSsl from '@vitejs/plugin-basic-ssl'
 import path from 'path'
 
 export default defineConfig(({ command }) => ({
-  base: command === 'build' ? '/sculpture-story/' : '/',
+  base: '/',
   plugins: [react(), basicSsl()],
   server: {
     fs: {
