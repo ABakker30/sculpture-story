@@ -47,6 +47,16 @@ const PRESETS: Record<string, Partial<MaterialConfig>> = {
     opacity: 1.0,
     transparent: false,
   },
+  gold: {
+    color: '#ffd700',
+    metalness: 1,
+    roughness: 0.1,
+    clearcoat: 0.4,
+    clearcoatRoughness: 0.1,
+    transmission: 0,
+    opacity: 1.0,
+    transparent: false,
+  },
   brushedMetal: {
     color: '#b0b0b0',
     metalness: 0.9,
@@ -128,10 +138,22 @@ const customPresets: Record<string, Partial<MaterialConfig>> = {}
 class MaterialController {
   private config: MaterialConfig
   private material: THREE.MeshPhysicalMaterial
+  private uvRepeatU: number = 1
+  private uvRepeatV: number = 5
 
   constructor(config: Partial<MaterialConfig> = {}) {
     this.config = { ...DEFAULT_CONFIG, ...config }
     this.material = this.createMaterial()
+  }
+
+  setUVRepeat(u: number, v: number): void {
+    this.uvRepeatU = u
+    this.uvRepeatV = v
+    console.info(`[MaterialController] UV repeat set to (${u}, ${v})`)
+  }
+
+  getUVRepeat(): { u: number; v: number } {
+    return { u: this.uvRepeatU, v: this.uvRepeatV }
   }
 
   private createMaterial(): THREE.MeshPhysicalMaterial {
@@ -210,6 +232,9 @@ class MaterialController {
       return
     }
 
+    // Clear any PBR textures when applying a non-PBR preset
+    this.clearPBRTextures()
+    
     this.config = { ...this.config, ...preset }
     this.updateMaterialFromConfig()
     console.info(`[MaterialController] Applied preset: ${presetName}`)
@@ -305,6 +330,7 @@ class MaterialController {
               texture.colorSpace = encoding || THREE.LinearSRGBColorSpace
               texture.wrapS = THREE.RepeatWrapping
               texture.wrapT = THREE.RepeatWrapping
+              texture.repeat.set(this.uvRepeatU, this.uvRepeatV) // Use stored UV repeat settings
               textures[key] = texture
               console.info(`[MaterialController] Loaded ${key} from ${filename}`)
             } catch (err) {
@@ -375,6 +401,42 @@ class MaterialController {
     }
     
     this.material.needsUpdate = true
+  }
+
+  applyUVChecker(gridSize: number = 8, repeatU: number = 1, repeatV: number = 50): void {
+    this.clearPBRTextures()
+    
+    // Create a checkerboard texture programmatically
+    const size = 512
+    const canvas = document.createElement('canvas')
+    canvas.width = size
+    canvas.height = size
+    const ctx = canvas.getContext('2d')!
+    
+    const cellSize = size / gridSize
+    for (let y = 0; y < gridSize; y++) {
+      for (let x = 0; x < gridSize; x++) {
+        ctx.fillStyle = (x + y) % 2 === 0 ? '#ffffff' : '#000000'
+        ctx.fillRect(x * cellSize, y * cellSize, cellSize, cellSize)
+      }
+    }
+    
+    const texture = new THREE.CanvasTexture(canvas)
+    texture.wrapS = THREE.RepeatWrapping
+    texture.wrapT = THREE.RepeatWrapping
+    texture.repeat.set(repeatU, repeatV)
+    texture.colorSpace = THREE.SRGBColorSpace
+    
+    // Apply as diffuse map with neutral material settings
+    this.material.map = texture
+    this.material.color.set('#ffffff')
+    this.material.metalness = 0
+    this.material.roughness = 1
+    this.material.clearcoat = 0
+    this.material.transmission = 0
+    this.material.needsUpdate = true
+    
+    console.info(`[MaterialController] UV checker applied (U:${repeatU}, V:${repeatV}, grid:${gridSize})`)
   }
 
   clearPBRTextures(): void {

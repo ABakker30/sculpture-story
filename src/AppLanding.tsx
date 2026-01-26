@@ -15,6 +15,7 @@ import modeController, { AppMode } from './engine/ModeController'
 import { ARController } from './engine/ARController'
 
 import { SettingsModal, CameraAnimationSettings } from './ui/SettingsModal'
+import { UVDebugModal } from './ui/UVDebugModal'
 
 interface SmoothCameraAnimation {
   isActive: boolean
@@ -47,6 +48,10 @@ interface DebugSceneProps {
   showHull: boolean
   arController?: ARController | null
   sceneResetTrigger?: number
+  galaxyStars: number
+  showPoints: boolean
+  pathsValue: number
+  showPaths: boolean
 }
 
 // Detect lattice type from corner distances and angles
@@ -247,7 +252,7 @@ function generateLatticePoints(
   return points
 }
 
-function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed, smoothCameraAnim, onSmoothAnimComplete, showHull, arController, sceneResetTrigger }: DebugSceneProps) {
+function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed, smoothCameraAnim, onSmoothAnimComplete, showHull, arController, sceneResetTrigger, galaxyStars, showPoints, pathsValue, showPaths }: DebugSceneProps) {
   const { scene, gl, camera } = useThree()
   
   // Set up AR controller with renderer, scene, and camera
@@ -1094,6 +1099,297 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     
   }, [loftProgress, straighten, initialized, scene, arController])
 
+  // Galaxy Stars effect
+  const galaxyStarsRef = useRef<THREE.Points | null>(null)
+  const sculptureRadiusRef = useRef<number>(30) // Default, will be computed from mesh
+  
+  // Compute and store sculpture radius when mesh changes
+  useEffect(() => {
+    if (meshRef.current) {
+      const boundingBox = new THREE.Box3().setFromObject(meshRef.current)
+      const boundingSphere = new THREE.Sphere()
+      boundingBox.getBoundingSphere(boundingSphere)
+      sculptureRadiusRef.current = boundingSphere.radius
+    }
+  }, [initialized])
+  
+  // Fade sculpture based on Points slider (0-20% = fade out, 20%+ = invisible)
+  useEffect(() => {
+    if (meshRef.current) {
+      if (!showPoints) {
+        // Not in Points mode - fully visible
+        meshRef.current.visible = true
+        const material = meshRef.current.material as THREE.MeshStandardMaterial
+        if (material) {
+          material.transparent = false
+          material.opacity = 1
+        }
+      } else {
+        // In Points mode - fade based on slider (0-20 = fade, 20+ = invisible)
+        const fadeProgress = Math.min(galaxyStars / 20, 1) // 0-20% slider = 0-100% fade
+        const opacity = 1 - fadeProgress
+        
+        if (opacity <= 0) {
+          meshRef.current.visible = false
+        } else {
+          meshRef.current.visible = true
+          const material = meshRef.current.material as THREE.MeshStandardMaterial
+          if (material) {
+            material.transparent = true
+            material.opacity = opacity
+          }
+        }
+      }
+    }
+  }, [showPoints, galaxyStars])
+  
+  // Create stars based on slider value (stars appear after black pause at 25%)
+  useEffect(() => {
+    // Remove existing galaxy stars
+    if (galaxyStarsRef.current) {
+      scene.remove(galaxyStarsRef.current)
+      galaxyStarsRef.current.geometry.dispose()
+      ;(galaxyStarsRef.current.material as THREE.PointsMaterial).dispose()
+      galaxyStarsRef.current = null
+    }
+    
+    // Only show stars when in Points mode AND after black pause (slider > 25)
+    if (!showPoints || galaxyStars <= 25) return
+    
+    const sphereRadius = sculptureRadiusRef.current * 3 // 3x sculpture bounds
+    
+    // Calculate star count with ease-in: remap slider 25-100 to star count 1-5000
+    const adjustedSlider = galaxyStars - 25 // 0-75 range
+    const t = adjustedSlider / 75 // Normalize to 0-1
+    const easeIn = t * t * t // Cubic ease-in: slow start, accelerates
+    
+    let starCount: number
+    if (adjustedSlider <= 1) {
+      starCount = 1 // Single center point
+    } else {
+      starCount = Math.max(1, Math.floor(easeIn * 5000)) // Scale to ~5000 with ease-in
+    }
+    
+    const positions = new Float32Array(starCount * 3)
+    const colors = new Float32Array(starCount * 3)
+    
+    for (let i = 0; i < starCount; i++) {
+      if (i === 0 && adjustedSlider <= 1) {
+        // First point at center
+        positions[0] = 0
+        positions[1] = 0
+        positions[2] = 0
+      } else {
+        // Random spherical distribution
+        const r = sphereRadius * Math.cbrt(Math.random()) // Cube root for volume distribution
+        const theta = Math.random() * Math.PI * 2
+        const phi = Math.acos(2 * Math.random() - 1)
+        
+        positions[i * 3] = r * Math.sin(phi) * Math.cos(theta)
+        positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta)
+        positions[i * 3 + 2] = r * Math.cos(phi)
+      }
+      
+      // Warm white colors
+      const colorVariation = Math.random()
+      colors[i * 3] = 0.9 + colorVariation * 0.1
+      colors[i * 3 + 1] = 0.85 + colorVariation * 0.15
+      colors[i * 3 + 2] = 0.8 + colorVariation * 0.2
+    }
+    
+    const geometry = new THREE.BufferGeometry()
+    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    
+    // Create circular texture for round points
+    const canvas = document.createElement('canvas')
+    canvas.width = 64
+    canvas.height = 64
+    const ctx = canvas.getContext('2d')!
+    const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32)
+    gradient.addColorStop(0, 'rgba(255,255,255,1)')
+    gradient.addColorStop(0.5, 'rgba(255,255,255,0.8)')
+    gradient.addColorStop(1, 'rgba(255,255,255,0)')
+    ctx.fillStyle = gradient
+    ctx.fillRect(0, 0, 64, 64)
+    const circleTexture = new THREE.CanvasTexture(canvas)
+    
+    const material = new THREE.PointsMaterial({
+      size: 0.6,
+      vertexColors: true,
+      transparent: true,
+      opacity: 1.0,
+      sizeAttenuation: true,
+      map: circleTexture,
+      alphaMap: circleTexture,
+      depthWrite: false,
+    })
+    
+    const stars = new THREE.Points(geometry, material)
+    stars.name = 'GALAXY_STARS'
+    scene.add(stars)
+    galaxyStarsRef.current = stars
+  }, [galaxyStars, showPoints, scene])
+
+  // Paths effect - connects actual star points
+  const pathsLinesRef = useRef<THREE.LineSegments | null>(null)
+  const galaxyStarPositionsRef = useRef<THREE.Vector3[]>([])
+  
+  // Store star positions when galaxy stars are created
+  useEffect(() => {
+    if (galaxyStarsRef.current && galaxyStars > 0) {
+      const positions = galaxyStarsRef.current.geometry.getAttribute('position')
+      if (positions) {
+        const stars: THREE.Vector3[] = []
+        for (let i = 0; i < positions.count; i++) {
+          stars.push(new THREE.Vector3(
+            positions.getX(i),
+            positions.getY(i),
+            positions.getZ(i)
+          ))
+        }
+        galaxyStarPositionsRef.current = stars
+      }
+    }
+  }, [galaxyStars, showPoints])
+  
+  // Create paths based on slider value - connecting actual star points
+  useEffect(() => {
+    // Remove existing paths
+    if (pathsLinesRef.current) {
+      scene.remove(pathsLinesRef.current)
+      pathsLinesRef.current.geometry.dispose()
+      ;(pathsLinesRef.current.material as THREE.LineBasicMaterial).dispose()
+      pathsLinesRef.current = null
+    }
+    
+    if (!showPaths || pathsValue === 0) return
+    
+    const stars = galaxyStarPositionsRef.current
+    if (stars.length < 2) return
+    
+    const linePositions: number[] = []
+    
+    // Helper to find nearest neighbor
+    const findNearestNeighbor = (starIdx: number, excludeSet: Set<number>): number => {
+      let nearestIdx = -1
+      let nearestDist = Infinity
+      const star = stars[starIdx]
+      for (let i = 0; i < stars.length; i++) {
+        if (i === starIdx || excludeSet.has(i)) continue
+        const dist = star.distanceTo(stars[i])
+        if (dist < nearestDist) {
+          nearestDist = dist
+          nearestIdx = i
+        }
+      }
+      return nearestIdx
+    }
+    
+    if (pathsValue <= 30) {
+      // 0-30%: Random short paths between nearby star pairs
+      const numPairs = Math.min(Math.floor((pathsValue / 30) * 50), Math.floor(stars.length / 2))
+      const usedStars = new Set<number>()
+      
+      for (let i = 0; i < numPairs && usedStars.size < stars.length - 1; i++) {
+        // Pick a random unused star
+        let starIdx = Math.floor(Math.random() * stars.length)
+        while (usedStars.has(starIdx)) {
+          starIdx = (starIdx + 1) % stars.length
+        }
+        usedStars.add(starIdx)
+        
+        // Find its nearest neighbor
+        const neighborIdx = findNearestNeighbor(starIdx, usedStars)
+        if (neighborIdx >= 0) {
+          usedStars.add(neighborIdx)
+          const s1 = stars[starIdx]
+          const s2 = stars[neighborIdx]
+          linePositions.push(s1.x, s1.y, s1.z, s2.x, s2.y, s2.z)
+        }
+      }
+    } else if (pathsValue <= 60) {
+      // 30-60%: Form constellation-like patterns (clusters of connected stars)
+      const progress = (pathsValue - 30) / 30
+      const numClusters = Math.floor(progress * 5) + 1
+      const starsPerCluster = Math.floor(progress * 7) + 3
+      
+      for (let c = 0; c < numClusters; c++) {
+        // Pick a random starting star for this cluster
+        const startIdx = Math.floor(Math.random() * stars.length)
+        const clusterStars = new Set<number>([startIdx])
+        let currentIdx = startIdx
+        
+        // Build a chain of connected stars
+        for (let i = 0; i < starsPerCluster - 1; i++) {
+          const nextIdx = findNearestNeighbor(currentIdx, clusterStars)
+          if (nextIdx >= 0) {
+            const s1 = stars[currentIdx]
+            const s2 = stars[nextIdx]
+            linePositions.push(s1.x, s1.y, s1.z, s2.x, s2.y, s2.z)
+            clusterStars.add(nextIdx)
+            currentIdx = nextIdx
+          }
+        }
+      }
+    } else if (pathsValue <= 90) {
+      // 60-90%: Paths converging toward sculpture center
+      const progress = (pathsValue - 60) / 30
+      const center = new THREE.Vector3(0, 0, 0)
+      const numPaths = Math.floor(progress * stars.length * 0.3) + 5
+      
+      // Sort stars by distance from center
+      const sortedStars = [...stars].sort((a, b) => a.distanceTo(center) - b.distanceTo(center))
+      
+      // Connect outer stars toward inner stars
+      for (let i = 0; i < numPaths && i < sortedStars.length - 1; i++) {
+        const outerIdx = sortedStars.length - 1 - i
+        const innerIdx = Math.floor(outerIdx * (1 - progress * 0.5))
+        if (innerIdx >= 0 && innerIdx < outerIdx) {
+          const s1 = sortedStars[outerIdx]
+          const s2 = sortedStars[innerIdx]
+          linePositions.push(s1.x, s1.y, s1.z, s2.x, s2.y, s2.z)
+        }
+      }
+    } else {
+      // 90-100%: Display final sculpture path (heartline)
+      const finalProgress = (pathsValue - 90) / 10
+      const numSegments = Math.floor(finalProgress * 50) + 10
+      const heightRange = sculptureRadiusRef.current * 2
+      const radius = sculptureRadiusRef.current * 0.3
+      
+      for (let i = 0; i < numSegments; i++) {
+        const t1 = i / numSegments
+        const t2 = (i + 1) / numSegments
+        const angle1 = t1 * Math.PI * 4
+        const angle2 = t2 * Math.PI * 4
+        const y1 = (t1 - 0.5) * heightRange
+        const y2 = (t2 - 0.5) * heightRange
+        
+        linePositions.push(
+          Math.cos(angle1) * radius, y1, Math.sin(angle1) * radius,
+          Math.cos(angle2) * radius, y2, Math.sin(angle2) * radius
+        )
+      }
+    }
+    
+    if (linePositions.length > 0) {
+      const geometry = new THREE.BufferGeometry()
+      geometry.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3))
+      
+      const material = new THREE.LineBasicMaterial({
+        color: 0xffffff,
+        transparent: true,
+        opacity: 0.7,
+      })
+      
+      const lines = new THREE.LineSegments(geometry, material)
+      lines.name = 'PATHS_LINES'
+      scene.add(lines)
+      pathsLinesRef.current = lines
+    }
+  }, [pathsValue, showPaths, scene, galaxyStars])
+
   // Track cleanup frames after AR exit
   const arCleanupFramesRef = useRef(0)
   
@@ -1380,6 +1676,26 @@ export function AppLanding() {
   const [settingsModalOpen, setSettingsModalOpen] = useState(false)
   const [debugPanelOpen, setDebugPanelOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
+  const [materialExpanded, setMaterialExpanded] = useState(false)
+  const [designExpanded, setDesignExpanded] = useState(false)
+  const [philosophyExpanded, setPhilosophyExpanded] = useState(false)
+  const [uvDebugModalOpen, setUvDebugModalOpen] = useState(false)
+  const [designPointsModalOpen, setDesignPointsModalOpen] = useState(false)
+  const [galaxyStarsValue, setGalaxyStarsValue] = useState(0)
+  const [galaxyInfoOpen, setGalaxyInfoOpen] = useState(false)
+  const [galaxyInfoPos, setGalaxyInfoPos] = useState({ x: 100, y: 100 })
+  const [designPathsModalOpen, setDesignPathsModalOpen] = useState(false)
+  const [pathsValue, setPathsValue] = useState(0)
+  const [pathsInfoOpen, setPathsInfoOpen] = useState(false)
+  const [pathsInfoPos, setPathsInfoPos] = useState({ x: 100, y: 150 })
+
+  useEffect(() => {
+    if (!menuOpen) {
+      setMaterialExpanded(false)
+      setDesignExpanded(false)
+      setPhilosophyExpanded(false)
+    }
+  }, [menuOpen])
   const [showHull, setShowHull] = useState(false)
   const [_cameraAnimSettings, setCameraAnimSettings] = useState<CameraAnimationSettings>({
     duration: 30,
@@ -1600,7 +1916,7 @@ export function AppLanding() {
         }}
       >
         {debugMode ? (
-          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} smoothCameraAnim={smoothCameraAnim} onSmoothAnimComplete={handleSmoothAnimComplete} showHull={showHull} arController={arControllerRef.current} sceneResetTrigger={sceneResetTrigger} />
+          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} smoothCameraAnim={smoothCameraAnim} onSmoothAnimComplete={handleSmoothAnimComplete} showHull={showHull} arController={arControllerRef.current} sceneResetTrigger={sceneResetTrigger} galaxyStars={galaxyStarsValue} showPoints={designPointsModalOpen} pathsValue={pathsValue} showPaths={designPathsModalOpen} />
         ) : (
           <SculptureScene onSculptureLoaded={handleSculptureLoaded} />
         )}
@@ -1874,20 +2190,59 @@ export function AppLanding() {
         </button>
         {menuOpen && (
           <div style={styles.dropdown}>
-            <button
-              style={styles.dropdownItem}
-              onClick={() => { setSettingsModalOpen(true); setMenuOpen(false); }}
-            >
-              Settings
-            </button>
-            {debugMode && (
+            <div style={{ position: 'relative' }}>
               <button
                 style={styles.dropdownItem}
-                onClick={() => { setDebugPanelOpen(!debugPanelOpen); setMenuOpen(false); }}
+                onClick={() => setMaterialExpanded(!materialExpanded)}
               >
-                Tools
+                Material {materialExpanded ? '▾' : '▸'}
               </button>
-            )}
+              {materialExpanded && (
+                <div style={{ paddingLeft: '12px', background: 'rgba(0,0,0,0.3)' }}>
+                  <button style={styles.dropdownItem} onClick={() => { materialController.loadPBRFromZip('/PBR/Metal048A_2K-JPG.zip'); setMenuOpen(false); }}>Gold</button>
+                  <button style={styles.dropdownItem} onClick={() => { materialController.applyPreset('stainlessSteel'); setMenuOpen(false); }}>Stainless Steel</button>
+                  <button style={styles.dropdownItem} onClick={() => { materialController.loadPBRFromZip('/PBR/Bronze.zip'); setMenuOpen(false); }}>Bronze</button>
+                  <button style={styles.dropdownItem} onClick={() => { materialController.loadPBRFromZip('/PBR/A23D_Old-Rusted-Raw-Metal_4K.zip'); setMenuOpen(false); }}>Corten</button>
+                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Marble</button>
+                </div>
+              )}
+            </div>
+            <div style={{ position: 'relative' }}>
+              <button
+                style={styles.dropdownItem}
+                onClick={() => setDesignExpanded(!designExpanded)}
+              >
+                Design {designExpanded ? '▾' : '▸'}
+              </button>
+              {designExpanded && (
+                <div style={{ paddingLeft: '12px', background: 'rgba(0,0,0,0.3)' }}>
+                  <button style={styles.dropdownItem} onClick={() => { setDesignPointsModalOpen(true); setMenuOpen(false); }}>Points</button>
+                  <button style={styles.dropdownItem} onClick={() => { setDesignPathsModalOpen(true); setMenuOpen(false); }}>Paths</button>
+                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Structure</button>
+                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Curved</button>
+                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Profiled</button>
+                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Symmetry</button>
+                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Perspectives</button>
+                </div>
+              )}
+            </div>
+            <div style={{ position: 'relative' }}>
+              <button
+                style={styles.dropdownItem}
+                onClick={() => setPhilosophyExpanded(!philosophyExpanded)}
+              >
+                Philosophy {philosophyExpanded ? '▾' : '▸'}
+              </button>
+              {philosophyExpanded && (
+                <div style={{ paddingLeft: '12px', background: 'rgba(0,0,0,0.3)' }}>
+                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Up or Down</button>
+                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Illusions</button>
+                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Chaos & Order</button>
+                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Shadows of Reality</button>
+                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Point of View</button>
+                </div>
+              )}
+            </div>
             {arSupported && !arActive && (
               <button
                 style={styles.dropdownItem}
@@ -1896,9 +2251,65 @@ export function AppLanding() {
                 View in AR
               </button>
             )}
+            <button
+              style={{ ...styles.dropdownItem, color: '#888' }}
+              onClick={() => { setSettingsModalOpen(true); setMenuOpen(false); }}
+            >
+              Settings
+            </button>
+            {debugMode && (
+              <button
+                style={{ ...styles.dropdownItem, color: '#888' }}
+                onClick={() => { setDebugPanelOpen(!debugPanelOpen); setMenuOpen(false); }}
+              >
+                Tools
+              </button>
+            )}
           </div>
         )}
       </div>
+
+      {/* Galaxy Stars slider - shows when Points is selected */}
+      {designPointsModalOpen && (
+        <div style={styles.galaxySliderContainer}>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={galaxyStarsValue}
+            onChange={(e) => setGalaxyStarsValue(Number(e.target.value))}
+            style={styles.galaxySlider}
+          />
+          <button
+            style={styles.infoButton}
+            onClick={() => setGalaxyInfoOpen(true)}
+            title="Info"
+          >
+            i
+          </button>
+        </div>
+      )}
+
+      {/* Paths slider - shows when Paths is selected */}
+      {designPathsModalOpen && (
+        <div style={styles.galaxySliderContainer}>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={pathsValue}
+            onChange={(e) => setPathsValue(Number(e.target.value))}
+            style={styles.galaxySlider}
+          />
+          <button
+            style={styles.infoButton}
+            onClick={() => setPathsInfoOpen(true)}
+            title="Info"
+          >
+            i
+          </button>
+        </div>
+      )}
 
       {/* Auto-rotate triangle button bottom right */}
       <button
@@ -1931,6 +2342,96 @@ export function AppLanding() {
         showHull={showHull}
         onShowHullChange={setShowHull}
       />
+      <UVDebugModal
+        isOpen={uvDebugModalOpen}
+        onClose={() => setUvDebugModalOpen(false)}
+      />
+      {/* Draggable Paths Info Modal */}
+      {pathsInfoOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            left: pathsInfoPos.x,
+            top: pathsInfoPos.y,
+            background: 'rgba(20,20,20,0.95)',
+            borderRadius: '8px',
+            padding: '12px 16px',
+            zIndex: 1000,
+            cursor: 'move',
+            maxWidth: '280px',
+            backdropFilter: 'blur(10px)',
+          }}
+          onMouseDown={(e) => {
+            const startX = e.clientX - pathsInfoPos.x
+            const startY = e.clientY - pathsInfoPos.y
+            const onMove = (ev: MouseEvent) => {
+              setPathsInfoPos({ x: ev.clientX - startX, y: ev.clientY - startY })
+            }
+            const onUp = () => {
+              window.removeEventListener('mousemove', onMove)
+              window.removeEventListener('mouseup', onUp)
+            }
+            window.addEventListener('mousemove', onMove)
+            window.addEventListener('mouseup', onUp)
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <span style={{ color: '#fff', fontSize: '13px', fontFamily: 'sans-serif' }}>Paths</span>
+            <button
+              onClick={() => setPathsInfoOpen(false)}
+              style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '16px', padding: 0 }}
+            >×</button>
+          </div>
+          <p style={{ color: '#999', fontSize: '12px', fontFamily: 'sans-serif', margin: 0, lineHeight: 1.4 }}>
+            <strong>0-30%:</strong> Random short paths between stars<br/>
+            <strong>30-60%:</strong> Constellations like Big Dipper<br/>
+            <strong>60-90%:</strong> Paths converging toward sculpture<br/>
+            <strong>90-100%:</strong> Final sculpture heartline path
+          </p>
+        </div>
+      )}
+
+      {/* Draggable Galaxy Stars Info Modal */}
+      {galaxyInfoOpen && (
+        <div
+          style={{
+            position: 'fixed',
+            left: galaxyInfoPos.x,
+            top: galaxyInfoPos.y,
+            background: 'rgba(20,20,20,0.95)',
+            borderRadius: '8px',
+            padding: '12px 16px',
+            zIndex: 1000,
+            cursor: 'move',
+            maxWidth: '250px',
+            backdropFilter: 'blur(10px)',
+          }}
+          onMouseDown={(e) => {
+            const startX = e.clientX - galaxyInfoPos.x
+            const startY = e.clientY - galaxyInfoPos.y
+            const onMove = (ev: MouseEvent) => {
+              setGalaxyInfoPos({ x: ev.clientX - startX, y: ev.clientY - startY })
+            }
+            const onUp = () => {
+              window.removeEventListener('mousemove', onMove)
+              window.removeEventListener('mouseup', onUp)
+            }
+            window.addEventListener('mousemove', onMove)
+            window.addEventListener('mouseup', onUp)
+          }}
+        >
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
+            <span style={{ color: '#fff', fontSize: '13px', fontFamily: 'sans-serif' }}>Galaxy Stars</span>
+            <button
+              onClick={() => setGalaxyInfoOpen(false)}
+              style={{ background: 'none', border: 'none', color: '#666', cursor: 'pointer', fontSize: '16px', padding: 0 }}
+            >×</button>
+          </div>
+          <p style={{ color: '#999', fontSize: '12px', fontFamily: 'sans-serif', margin: 0, lineHeight: 1.4 }}>
+            Adds a field of stars around the sculpture in a galaxy-like disc pattern, creating a cosmic atmosphere.
+          </p>
+        </div>
+      )}
     </div>
   )
 }
@@ -1979,6 +2480,7 @@ const styles: Record<string, React.CSSProperties> = {
     textAlign: 'left' as const,
     cursor: 'pointer',
     fontFamily: 'sans-serif',
+    whiteSpace: 'nowrap' as const,
   },
   autoRotateButton: {
     position: 'absolute',
@@ -1995,6 +2497,37 @@ const styles: Record<string, React.CSSProperties> = {
     justifyContent: 'center',
     backdropFilter: 'blur(10px)',
     transition: 'background 0.2s',
+  },
+  galaxySliderContainer: {
+    position: 'absolute',
+    bottom: '28px',
+    right: '80px',
+    display: 'flex',
+    alignItems: 'center',
+    gap: '8px',
+  },
+  galaxySlider: {
+    width: '100px',
+    height: '4px',
+    WebkitAppearance: 'none',
+    appearance: 'none',
+    background: '#333',
+    borderRadius: '2px',
+    outline: 'none',
+    cursor: 'pointer',
+  },
+  infoButton: {
+    width: '24px',
+    height: '24px',
+    borderRadius: '50%',
+    border: '1px solid #444',
+    background: 'rgba(0,0,0,0.5)',
+    color: '#888',
+    fontSize: '12px',
+    cursor: 'pointer',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
   },
   arButton: {
     position: 'absolute',
