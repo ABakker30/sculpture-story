@@ -1997,7 +1997,6 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         
         // Check direction: compare second corner to curve direction
         const secondCorner = pathCorners[1]
-        const _curveAtStart = targetCurve.getPoint(bestT)
         const curveSlightlyAhead = targetCurve.getPoint((bestT + 0.05) % 1)
         const curveSlightlyBehind = targetCurve.getPoint((bestT + 0.95) % 1)
         
@@ -2805,7 +2804,6 @@ export function AppLanding() {
     // Determine which slider to animate based on active chapter
     let currentValue = 0
     let setValue: (v: number) => void
-    let _isStory = false
 
     if (activeChapter === 'story') {
       currentValue = storyValue
@@ -2864,7 +2862,6 @@ export function AppLanding() {
           setDesignProfiledModalOpen(true)
         }
       }
-      _isStory = true
     } else if (activeChapter === 'profiled') {
       currentValue = profiledValue
       setValue = setProfiledValue
