@@ -2500,6 +2500,12 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
 }
 
 function createLoftGeometry(sections: THREE.Vector3[][]): THREE.BufferGeometry {
+  // Guard against empty or invalid sections
+  if (!sections || sections.length < 2 || !sections[0] || sections[0].length < 2) {
+    const geo = new THREE.BufferGeometry()
+    geo.setAttribute('position', new THREE.Float32BufferAttribute([], 3))
+    return geo
+  }
   const vps = sections[0].length - 1 // Exclude last point (same as first for closed sections)
   const numSections = sections.length - 1 // Exclude last section (reuse first for closed loft)
   const positions: number[] = []

@@ -3,8 +3,8 @@ import react from '@vitejs/plugin-react'
 import basicSsl from '@vitejs/plugin-basic-ssl'
 import path from 'path'
 
-export default defineConfig({
-  base: '/sculpture-story/',
+export default defineConfig(({ command }) => ({
+  base: command === 'build' ? '/sculpture-story/' : '/',
   plugins: [react(), basicSsl()],
   server: {
     fs: {
@@ -27,4 +27,4 @@ export default defineConfig({
       },
     },
   },
-})
+}))
