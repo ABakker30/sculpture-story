@@ -1291,6 +1291,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   const animatedShapesRef = useRef<{ line: THREE.Line, points: THREE.Vector3[], progress: number, speed: number, segmentIndex: number }[]>([])
   const sculpturePathRef = useRef<THREE.Vector3[]>([])
   const sculptureCurveRef = useRef<THREE.Vector3[]>([])
+  const pathsPhaseRef = useRef<number>(-1) // Track current phase to avoid recreating on every slider tick
   
   // Store star positions when galaxy stars are created
   useEffect(() => {
@@ -1327,6 +1328,26 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   
   // Setup paths based on slider phase
   useEffect(() => {
+    // Determine current phase (0-20, 20-40, 40-55, 55-70, 70-100)
+    let currentPhase = -1
+    if (!showPaths || pathsValue === 0) {
+      currentPhase = -1
+    } else if (pathsValue <= 20) {
+      currentPhase = 1 // Shooting stars
+    } else if (pathsValue <= 40) {
+      currentPhase = 2 // Growing paths
+    } else if (pathsValue <= 55) {
+      currentPhase = 3 // Shapes
+    } else if (pathsValue <= 70) {
+      currentPhase = 4 // Constellations
+    } else {
+      currentPhase = 5 // Sculpture path
+    }
+    
+    // Only recreate if phase changed
+    if (currentPhase === pathsPhaseRef.current) return
+    pathsPhaseRef.current = currentPhase
+    
     // Cleanup existing
     if (pathsGroupRef.current) {
       scene.remove(pathsGroupRef.current)
@@ -1350,7 +1371,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     
     if (pathsValue <= 20) {
       // Phase 1: Shooting stars (0-20%)
-      const numShooters = Math.floor((pathsValue / 20) * 8) + 1
+      const numShooters = Math.floor((pathsValue / 20) * 15) + 5
       for (let i = 0; i < numShooters; i++) {
         const startIdx = Math.floor(Math.random() * Math.max(1, stars.length))
         const start = stars.length > 0 ? stars[startIdx].clone() : new THREE.Vector3(
@@ -1366,7 +1387,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         const line = new THREE.Line(geometry, material)
         group.add(line)
         
-        shootingStarsRef.current.push({ line, start, end, progress: Math.random(), speed: 0.3 + Math.random() * 0.5 })
+        shootingStarsRef.current.push({ line, start, end, progress: Math.random(), speed: 0.1 + Math.random() * 0.17 })
       }
     } else if (pathsValue <= 40) {
       // Phase 2: Growing paths (20-40%) - 2 to 10 segments
@@ -1396,7 +1417,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       // Phase 3a: Geometric shapes (40-55%) - animated drawing
       const progress = (pathsValue - 40) / 15
       const shapes = [constellations.triangle, constellations.square, constellations.pentagon]
-      const numShapes = Math.floor(progress * 3) + 1
+      const numShapes = Math.floor(progress * 6) + 3
       
       for (let i = 0; i < numShapes; i++) {
         const shape = shapes[i % shapes.length]
@@ -1414,7 +1435,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         const line = new THREE.Line(geometry, material)
         group.add(line)
         
-        animatedShapesRef.current.push({ line, points, progress: Math.random(), speed: 0.15 + Math.random() * 0.1, segmentIndex: 0 })
+        animatedShapesRef.current.push({ line, points, progress: Math.random(), speed: 0.05 + Math.random() * 0.033, segmentIndex: 0 })
       }
     } else if (pathsValue <= 70) {
       // Phase 3b: Constellations (55-70%) - animated drawing
@@ -1429,7 +1450,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         const material = new THREE.LineBasicMaterial({ color: 0xffffaa, transparent: true, opacity: 0.8 })
         const line = new THREE.Line(geometry, material)
         group.add(line)
-        animatedShapesRef.current.push({ line, points, progress: 0, speed: 0.12, segmentIndex: 0 })
+        animatedShapesRef.current.push({ line, points, progress: 0, speed: 0.04, segmentIndex: 0 })
       }
       
       // Orion
@@ -1440,7 +1461,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         const material = new THREE.LineBasicMaterial({ color: 0xffaaaa, transparent: true, opacity: 0.8 })
         const line = new THREE.Line(geometry, material)
         group.add(line)
-        animatedShapesRef.current.push({ line, points, progress: 0, speed: 0.1, segmentIndex: 0 })
+        animatedShapesRef.current.push({ line, points, progress: 0, speed: 0.033, segmentIndex: 0 })
       }
     } else {
       // Phase 4: Sculpture path reveal (70-100%)
@@ -1976,7 +1997,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         
         // Check direction: compare second corner to curve direction
         const secondCorner = pathCorners[1]
-        const curveAtStart = targetCurve.getPoint(bestT)
+        const _curveAtStart = targetCurve.getPoint(bestT)
         const curveSlightlyAhead = targetCurve.getPoint((bestT + 0.05) % 1)
         const curveSlightlyBehind = targetCurve.getPoint((bestT + 0.95) % 1)
         
@@ -2274,7 +2295,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     // Animate shooting stars
     if (showPaths && pathsValue <= 20 && shootingStarsRef.current.length > 0) {
       shootingStarsRef.current.forEach(shooter => {
-        shooter.progress += delta * shooter.speed
+        shooter.progress += delta * shooter.speed * 0.1
         if (shooter.progress > 1) {
           shooter.progress = 0
           // Respawn at new random position
@@ -2288,7 +2309,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
           )
           const direction = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize()
           shooter.end = shooter.start.clone().add(direction.multiplyScalar(sphereRadius * 0.5))
-          shooter.speed = 0.3 + Math.random() * 0.5
+          shooter.speed = 0.03 + Math.random() * 0.05
         }
         
         // Update line geometry - draw trail from current position back
@@ -2310,7 +2331,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     // Animate shapes and constellations (phases 3a and 3b)
     if (showPaths && pathsValue > 40 && pathsValue <= 70 && animatedShapesRef.current.length > 0) {
       animatedShapesRef.current.forEach(shape => {
-        shape.progress += delta * shape.speed
+        shape.progress += delta * shape.speed * 0.1
         
         // Calculate how many segments to show based on progress
         const totalSegments = shape.points.length - 1
@@ -2625,7 +2646,7 @@ export function AppLanding() {
   const [menuOpen, setMenuOpen] = useState(false)
   const [materialExpanded, setMaterialExpanded] = useState(false)
   const [designExpanded, setDesignExpanded] = useState(false)
-  const [philosophyExpanded, setPhilosophyExpanded] = useState(false)
+  const [_philosophyExpanded, _setPhilosophyExpanded] = useState(false)
   const [uvDebugModalOpen, setUvDebugModalOpen] = useState(false)
   const [designPointsModalOpen, setDesignPointsModalOpen] = useState(false)
   const [galaxyStarsValue, setGalaxyStarsValue] = useState(0)
@@ -2641,11 +2662,12 @@ export function AppLanding() {
   const [curvedValue, setCurvedValue] = useState(0)
   const [designProfiledModalOpen, setDesignProfiledModalOpen] = useState(false)
   const [profiledValue, setProfiledValue] = useState(0)
-  const [designStoryModalOpen, setDesignStoryModalOpen] = useState(false)
+  const [_designStoryModalOpen, setDesignStoryModalOpen] = useState(false)
   const [storyValue, setStoryValue] = useState(0)
   const [designAnimPlaying, setDesignAnimPlaying] = useState(false)
   const designAnimRef = useRef<number | null>(null)
-  const [activeChapter, setActiveChapter] = useState<'points' | 'paths' | 'structure' | 'curved' | 'profiled' | 'story' | null>(null)
+  const [activeChapter, setActiveChapter] = useState<'points' | 'paths' | 'structure' | 'curved' | 'profiled' | 'story' | 'philosophy' | null>(null)
+  const [_philosophyMode, setPhilosophyMode] = useState(false)
   
   // Per-chapter play durations in milliseconds
   const chapterDurations = {
@@ -2654,14 +2676,14 @@ export function AppLanding() {
     structure: 15000,  // 15 seconds
     curved: 10000,     // 10 seconds
     profiled: 15000,   // 15 seconds
-    story: 90000       // 90 seconds total (1.5 minutes)
+    story: 90000,      // 90 seconds total (1.5 minutes)
+    philosophy: 90000  // 90 seconds total (1.5 minutes)
   }
 
   useEffect(() => {
     if (!menuOpen) {
       setMaterialExpanded(false)
       setDesignExpanded(false)
-      setPhilosophyExpanded(false)
     }
   }, [menuOpen])
   const [showHull, setShowHull] = useState(false)
@@ -2783,7 +2805,7 @@ export function AppLanding() {
     // Determine which slider to animate based on active chapter
     let currentValue = 0
     let setValue: (v: number) => void
-    let isStory = false
+    let _isStory = false
 
     if (activeChapter === 'story') {
       currentValue = storyValue
@@ -2842,7 +2864,7 @@ export function AppLanding() {
           setDesignProfiledModalOpen(true)
         }
       }
-      isStory = true
+      _isStory = true
     } else if (activeChapter === 'profiled') {
       currentValue = profiledValue
       setValue = setProfiledValue
@@ -2858,6 +2880,68 @@ export function AppLanding() {
     } else if (activeChapter === 'points') {
       currentValue = galaxyStarsValue
       setValue = setGalaxyStarsValue
+    } else if (activeChapter === 'philosophy') {
+      currentValue = storyValue
+      setValue = (v: number) => {
+        setStoryValue(v)
+        // Same phase mapping as story
+        if (v <= 20) {
+          const phaseProgress = (v / 20) * 100
+          setGalaxyStarsValue(phaseProgress)
+          setPathsValue(0)
+          setStructureValue(0)
+          setCurvedValue(0)
+          setProfiledValue(0)
+          setDesignPathsModalOpen(false)
+          setDesignStructureModalOpen(false)
+          setDesignCurvedModalOpen(false)
+          setDesignProfiledModalOpen(false)
+        } else if (v <= 40) {
+          const phaseProgress = ((v - 20) / 20) * 100
+          setGalaxyStarsValue(100)
+          setPathsValue(phaseProgress)
+          setStructureValue(0)
+          setCurvedValue(0)
+          setProfiledValue(0)
+          setDesignPathsModalOpen(true)
+          setDesignStructureModalOpen(false)
+          setDesignCurvedModalOpen(false)
+          setDesignProfiledModalOpen(false)
+        } else if (v <= 60) {
+          const phaseProgress = ((v - 40) / 20) * 100
+          setGalaxyStarsValue(100)
+          setPathsValue(100)
+          setStructureValue(phaseProgress)
+          setCurvedValue(0)
+          setProfiledValue(0)
+          setDesignPathsModalOpen(true)
+          setDesignStructureModalOpen(true)
+          setDesignCurvedModalOpen(false)
+          setDesignProfiledModalOpen(false)
+        } else if (v <= 80) {
+          const phaseProgress = ((v - 60) / 20) * 100
+          setGalaxyStarsValue(100)
+          setPathsValue(100)
+          setStructureValue(100)
+          setCurvedValue(phaseProgress)
+          setProfiledValue(0)
+          setDesignPathsModalOpen(true)
+          setDesignStructureModalOpen(true)
+          setDesignCurvedModalOpen(true)
+          setDesignProfiledModalOpen(false)
+        } else {
+          const phaseProgress = ((v - 80) / 20) * 100
+          setGalaxyStarsValue(100)
+          setPathsValue(100)
+          setStructureValue(100)
+          setCurvedValue(100)
+          setProfiledValue(phaseProgress)
+          setDesignPathsModalOpen(true)
+          setDesignStructureModalOpen(true)
+          setDesignCurvedModalOpen(true)
+          setDesignProfiledModalOpen(true)
+        }
+      }
     } else {
       return // No chapter selected
     }
@@ -3059,23 +3143,19 @@ export function AppLanding() {
                 </div>
               )}
             </div>
-            <div style={{ position: 'relative' }}>
-              <button
-                style={styles.dropdownItem}
-                onClick={() => setPhilosophyExpanded(!philosophyExpanded)}
-              >
-                Philosophy {philosophyExpanded ? '▾' : '▸'}
-              </button>
-              {philosophyExpanded && (
-                <div style={{ paddingLeft: '12px', background: 'rgba(0,0,0,0.3)' }}>
-                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Up or Down</button>
-                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Illusions</button>
-                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Chaos & Order</button>
-                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Shadows of Reality</button>
-                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Point of View</button>
-                </div>
-              )}
-            </div>
+            <button
+              style={styles.dropdownItem}
+              onClick={() => { 
+                setPhilosophyMode(true)
+                setDesignStoryModalOpen(true)
+                setDesignPointsModalOpen(true)
+                setStoryValue(0)
+                setActiveChapter('philosophy')
+                setMenuOpen(false)
+              }}
+            >
+              Philosophy
+            </button>
             {arSupported && !arActive && (
               <button
                 style={styles.dropdownItem}
@@ -3093,6 +3173,238 @@ export function AppLanding() {
                       </div>
         )}
       </div>
+
+      {/* Context-sensitive title and subtitle with dynamic narration */}
+      {activeChapter && (() => {
+        // Dynamic narration based on chapter and slider position
+        let title = ''
+        let subtitle = ''
+        
+        if (activeChapter === 'points' || (activeChapter === 'story' && storyValue <= 20)) {
+          const val = activeChapter === 'story' ? (storyValue / 20) * 100 : galaxyStarsValue
+          if (val <= 10) {
+            title = 'In The Beginning'
+            subtitle = 'There was nothing but infinite darkness...'
+          } else if (val <= 25) {
+            title = 'A Spark'
+            subtitle = 'A single point of light pierces the void'
+          } else if (val <= 50) {
+            title = 'Awakening'
+            subtitle = 'More points of light begin to emerge'
+          } else if (val <= 75) {
+            title = 'Multiplicity'
+            subtitle = 'The darkness fills with countless stars'
+          } else {
+            title = 'The Cosmos'
+            subtitle = 'A universe of possibilities takes shape'
+          }
+        } else if (activeChapter === 'paths' || (activeChapter === 'story' && storyValue <= 40)) {
+          const val = activeChapter === 'story' ? ((storyValue - 20) / 20) * 100 : pathsValue
+          if (val <= 20) {
+            title = 'First Movement'
+            subtitle = 'Light begins to travel through space'
+          } else if (val <= 40) {
+            title = 'Seeking'
+            subtitle = 'Paths reach out, searching for connection'
+          } else if (val <= 60) {
+            title = 'Convergence'
+            subtitle = 'Distant points find each other'
+          } else if (val <= 80) {
+            title = 'The Path Emerges'
+            subtitle = 'A continuous journey begins to form'
+          } else {
+            title = 'Connected'
+            subtitle = 'All points united in one flowing path'
+          }
+        } else if (activeChapter === 'structure' || (activeChapter === 'story' && storyValue <= 60)) {
+          const val = activeChapter === 'story' ? ((storyValue - 40) / 20) * 100 : structureValue
+          if (val <= 25) {
+            title = 'Crystallization'
+            subtitle = 'Order begins to emerge from chaos'
+          } else if (val <= 50) {
+            title = 'The Lattice'
+            subtitle = 'A geometric framework takes hold'
+          } else if (val <= 75) {
+            title = 'Dissolution'
+            subtitle = 'Rigid structure yields to something new'
+          } else {
+            title = 'Transformation'
+            subtitle = 'The skeleton of form remains'
+          }
+        } else if (activeChapter === 'curved' || (activeChapter === 'story' && storyValue <= 80)) {
+          const val = activeChapter === 'story' ? ((storyValue - 60) / 20) * 100 : curvedValue
+          if (val <= 25) {
+            title = 'Softening'
+            subtitle = 'Sharp angles begin to relax'
+          } else if (val <= 50) {
+            title = 'Flow'
+            subtitle = 'Lines learn to bend and breathe'
+          } else if (val <= 75) {
+            title = 'Grace'
+            subtitle = 'The path finds its natural rhythm'
+          } else {
+            title = 'Organic'
+            subtitle = 'Geometry surrenders to nature'
+          }
+        } else if (activeChapter === 'profiled' || (activeChapter === 'story' && storyValue > 80)) {
+          const val = activeChapter === 'story' ? ((storyValue - 80) / 20) * 100 : profiledValue
+          if (val <= 15) {
+            title = 'Becoming'
+            subtitle = 'The essence begins to take form'
+          } else if (val <= 35) {
+            title = 'Growth'
+            subtitle = 'Material sweeps along the path'
+          } else if (val <= 55) {
+            title = 'Expansion'
+            subtitle = 'The sculpture fills its space'
+          } else if (val <= 75) {
+            title = 'Refinement'
+            subtitle = 'Details emerge in the final form'
+          } else if (val <= 95) {
+            title = 'Completion'
+            subtitle = 'The vision becomes reality'
+          } else {
+            title = 'Eternal'
+            subtitle = 'A moment frozen in time, forever'
+          }
+        } else if (activeChapter === 'philosophy') {
+          // Philosophy narration - same animation, different meaning
+          if (storyValue <= 20) {
+            // Chapter 1: PERSPECTIVE
+            const val = (storyValue / 20) * 100
+            if (val <= 10) {
+              title = 'In The Beginning'
+              subtitle = 'When we know nothing, we see only shadows'
+            } else if (val <= 25) {
+              title = 'A Spark'
+              subtitle = 'One insight illuminates an entire new reality'
+            } else if (val <= 50) {
+              title = 'Awakening'
+              subtitle = 'As perspective expands, so does our understanding'
+            } else if (val <= 75) {
+              title = 'Multiplicity'
+              subtitle = 'The world is revealed as full of endless viewpoints'
+            } else {
+              title = 'The Cosmos'
+              subtitle = 'Infinite perspectives create the universe of truth'
+            }
+          } else if (storyValue <= 40) {
+            // Chapter 2: CONNECTION
+            const val = ((storyValue - 20) / 20) * 100
+            if (val <= 20) {
+              title = 'First Movement'
+              subtitle = 'To understand is to begin to reach out'
+            } else if (val <= 40) {
+              title = 'Seeking'
+              subtitle = 'We search for meaning by connecting one idea to another'
+            } else if (val <= 60) {
+              title = 'Convergence'
+              subtitle = 'Perspectives meet, forming deeper insights'
+            } else if (val <= 80) {
+              title = 'The Path Emerges'
+              subtitle = 'Our understanding is a journey built on connections'
+            } else {
+              title = 'Connected'
+              subtitle = 'All insights form a continuous exploration'
+            }
+          } else if (storyValue <= 60) {
+            // Chapter 3: FORM
+            const val = ((storyValue - 40) / 20) * 100
+            if (val <= 25) {
+              title = 'Crystallization'
+              subtitle = 'Understanding takes shape from scattered thoughts'
+            } else if (val <= 50) {
+              title = 'The Lattice'
+              subtitle = 'The structure of knowledge gives order to perspective'
+            } else if (val <= 75) {
+              title = 'Dissolution'
+              subtitle = 'Growth demands that we release rigid assumptions'
+            } else {
+              title = 'Transformation'
+              subtitle = 'The framework remains, but meaning evolves'
+            }
+          } else if (storyValue <= 80) {
+            // Chapter 4: FLUIDITY
+            const val = ((storyValue - 60) / 20) * 100
+            if (val <= 25) {
+              title = 'Softening'
+              subtitle = 'True understanding bends with openness'
+            } else if (val <= 50) {
+              title = 'Flow'
+              subtitle = 'Perspective thrives when it adapts and moves'
+            } else if (val <= 75) {
+              title = 'Grace'
+              subtitle = 'We discover beauty in the harmony of flexibility'
+            } else {
+              title = 'Organic'
+              subtitle = 'Insight aligns with nature, ever-evolving'
+            }
+          } else {
+            // Chapter 5: REALIZATION
+            const val = ((storyValue - 80) / 20) * 100
+            if (val <= 15) {
+              title = 'Becoming'
+              subtitle = 'We start to embody the wisdom we\'ve built'
+            } else if (val <= 35) {
+              title = 'Growth'
+              subtitle = 'We manifest our newfound perspective in life'
+            } else if (val <= 55) {
+              title = 'Expansion'
+              subtitle = 'Our awareness fills the world around us'
+            } else if (val <= 75) {
+              title = 'Refinement'
+              subtitle = 'We sharpen our perspective, seeing what was hidden'
+            } else if (val <= 95) {
+              title = 'Completion'
+              subtitle = 'True understanding lingers beyond time'
+            } else {
+              title = 'Eternal'
+              subtitle = 'Perspective is a lifelong gift—forever changing how we see'
+            }
+          }
+        }
+        
+        return (
+          <div style={{
+            position: 'absolute',
+            top: '24px',
+            left: '50%',
+            transform: 'translateX(-50%)',
+            textAlign: 'center',
+            zIndex: 10,
+            pointerEvents: 'none',
+            background: 'rgba(0, 0, 0, 0.4)',
+            padding: '16px 32px',
+            borderRadius: '8px',
+            backdropFilter: 'blur(4px)'
+          }}>
+            <h1 style={{
+              margin: 0,
+              fontSize: '28px',
+              fontWeight: 300,
+              letterSpacing: '4px',
+              textTransform: 'uppercase',
+              color: 'rgba(255, 255, 255, 0.95)',
+              textShadow: '0 2px 10px rgba(0, 0, 0, 0.5)',
+              fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif"
+            }}>
+              {title}
+            </h1>
+            <p style={{
+              margin: '8px 0 0 0',
+              fontSize: '14px',
+              fontWeight: 300,
+              letterSpacing: '1px',
+              color: 'rgba(255, 255, 255, 0.85)',
+              textShadow: '0 1px 6px rgba(0, 0, 0, 0.4)',
+              fontFamily: "'Helvetica Neue', Helvetica, Arial, sans-serif",
+              fontStyle: 'italic'
+            }}>
+              {subtitle}
+            </p>
+          </div>
+        )
+      })()}
 
       {/* Galaxy Stars slider - shows when Points chapter is active */}
       {activeChapter === 'points' && (
@@ -3268,6 +3580,88 @@ export function AppLanding() {
                 setDesignProfiledModalOpen(false)
               } else {
                 // Profiled phase
+                const phaseProgress = ((val - 80) / 20) * 100
+                setGalaxyStarsValue(100)
+                setPathsValue(100)
+                setStructureValue(100)
+                setCurvedValue(100)
+                setProfiledValue(phaseProgress)
+                setDesignPathsModalOpen(true)
+                setDesignStructureModalOpen(true)
+                setDesignCurvedModalOpen(true)
+                setDesignProfiledModalOpen(true)
+              }
+            }}
+            style={styles.galaxySlider}
+          />
+          <button
+            style={styles.infoButton}
+            onClick={() => {}}
+            title="Info"
+          >
+            i
+          </button>
+        </div>
+      )}
+
+      {/* Philosophy slider - shows when Philosophy is active */}
+      {activeChapter === 'philosophy' && (
+        <div style={styles.galaxySliderContainer}>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={storyValue}
+            onChange={(e) => {
+              const val = Number(e.target.value)
+              setStoryValue(val)
+              
+              // Same phase mapping as story - just different narration text
+              if (val <= 20) {
+                const phaseProgress = (val / 20) * 100
+                setGalaxyStarsValue(phaseProgress)
+                setPathsValue(0)
+                setStructureValue(0)
+                setCurvedValue(0)
+                setProfiledValue(0)
+                setDesignPathsModalOpen(false)
+                setDesignStructureModalOpen(false)
+                setDesignCurvedModalOpen(false)
+                setDesignProfiledModalOpen(false)
+              } else if (val <= 40) {
+                const phaseProgress = ((val - 20) / 20) * 100
+                setGalaxyStarsValue(100)
+                setPathsValue(phaseProgress)
+                setStructureValue(0)
+                setCurvedValue(0)
+                setProfiledValue(0)
+                setDesignPathsModalOpen(true)
+                setDesignStructureModalOpen(false)
+                setDesignCurvedModalOpen(false)
+                setDesignProfiledModalOpen(false)
+              } else if (val <= 60) {
+                const phaseProgress = ((val - 40) / 20) * 100
+                setGalaxyStarsValue(100)
+                setPathsValue(100)
+                setStructureValue(phaseProgress)
+                setCurvedValue(0)
+                setProfiledValue(0)
+                setDesignPathsModalOpen(true)
+                setDesignStructureModalOpen(true)
+                setDesignCurvedModalOpen(false)
+                setDesignProfiledModalOpen(false)
+              } else if (val <= 80) {
+                const phaseProgress = ((val - 60) / 20) * 100
+                setGalaxyStarsValue(100)
+                setPathsValue(100)
+                setStructureValue(100)
+                setCurvedValue(phaseProgress)
+                setProfiledValue(0)
+                setDesignPathsModalOpen(true)
+                setDesignStructureModalOpen(true)
+                setDesignCurvedModalOpen(true)
+                setDesignProfiledModalOpen(false)
+              } else {
                 const phaseProgress = ((val - 80) / 20) * 100
                 setGalaxyStarsValue(100)
                 setPathsValue(100)
