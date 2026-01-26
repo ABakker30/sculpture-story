@@ -56,6 +56,8 @@ interface DebugSceneProps {
   showStructure: boolean
   curvedValue: number
   showCurved: boolean
+  profiledValue: number
+  showProfiled: boolean
 }
 
 // Detect lattice type from corner distances and angles
@@ -256,7 +258,7 @@ function generateLatticePoints(
   return points
 }
 
-function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed, smoothCameraAnim, onSmoothAnimComplete, showHull, arController, sceneResetTrigger, galaxyStars, showPoints, pathsValue, showPaths, structureValue, showStructure, curvedValue, showCurved }: DebugSceneProps) {
+function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed, smoothCameraAnim, onSmoothAnimComplete, showHull, arController, sceneResetTrigger, galaxyStars, showPoints, pathsValue, showPaths, structureValue, showStructure, curvedValue, showCurved, profiledValue, showProfiled }: DebugSceneProps) {
   const { scene, gl, camera } = useThree()
   
   // Set up AR controller with renderer, scene, and camera
@@ -1127,9 +1129,23 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   }, [initialized])
   
   // Fade sculpture based on Points slider (0-20% = fade out, 20%+ = invisible)
+  // Keep hidden during Profiled animation, only show at profiledValue=100
   useEffect(() => {
     if (meshRef.current) {
-      if (!showPoints) {
+      if (showProfiled) {
+        // During Profiled phase - hide original mesh (Profiled effect draws its own)
+        // Only show at 100% when animation is complete
+        if (profiledValue >= 100) {
+          meshRef.current.visible = true
+          const material = meshRef.current.material as THREE.MeshStandardMaterial
+          if (material) {
+            material.transparent = false
+            material.opacity = 1
+          }
+        } else {
+          meshRef.current.visible = false
+        }
+      } else if (!showPoints) {
         // Not in Points mode - fully visible
         meshRef.current.visible = true
         const material = meshRef.current.material as THREE.MeshStandardMaterial
@@ -1154,7 +1170,56 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         }
       }
     }
-  }, [showPoints, galaxyStars])
+  }, [showPoints, showProfiled, profiledValue, galaxyStars])
+  
+  // Pre-computed star positions pool (seeded for determinism)
+  const starPoolRef = useRef<{ positions: Float32Array, colors: Float32Array } | null>(null)
+  const maxStars = 5000
+  
+  // Initialize star pool once with seeded random
+  useEffect(() => {
+    if (starPoolRef.current) return // Already initialized
+    
+    // Seeded random number generator (mulberry32)
+    const seed = 12345
+    let state = seed
+    const seededRandom = () => {
+      state = (state + 0x6D2B79F5) | 0
+      let t = Math.imul(state ^ (state >>> 15), 1 | state)
+      t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t
+      return ((t ^ (t >>> 14)) >>> 0) / 4294967296
+    }
+    
+    const sphereRadius = sculptureRadiusRef.current * 3
+    const positions = new Float32Array(maxStars * 3)
+    const colors = new Float32Array(maxStars * 3)
+    
+    // First point at center
+    positions[0] = 0
+    positions[1] = 0
+    positions[2] = 0
+    
+    for (let i = 0; i < maxStars; i++) {
+      if (i > 0) {
+        // Seeded spherical distribution
+        const r = sphereRadius * Math.cbrt(seededRandom())
+        const theta = seededRandom() * Math.PI * 2
+        const phi = Math.acos(2 * seededRandom() - 1)
+        
+        positions[i * 3] = r * Math.sin(phi) * Math.cos(theta)
+        positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta)
+        positions[i * 3 + 2] = r * Math.cos(phi)
+      }
+      
+      // Warm white colors (seeded)
+      const colorVariation = seededRandom()
+      colors[i * 3] = 0.9 + colorVariation * 0.1
+      colors[i * 3 + 1] = 0.85 + colorVariation * 0.15
+      colors[i * 3 + 2] = 0.8 + colorVariation * 0.2
+    }
+    
+    starPoolRef.current = { positions, colors }
+  }, [])
   
   // Create stars based on slider value (stars appear after black pause at 25%)
   useEffect(() => {
@@ -1167,9 +1232,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     }
     
     // Only show stars when in Points mode AND after black pause (slider > 25)
-    if (!showPoints || galaxyStars <= 25) return
-    
-    const sphereRadius = sculptureRadiusRef.current * 3 // 3x sculpture bounds
+    if (!showPoints || galaxyStars <= 25 || !starPoolRef.current) return
     
     // Calculate star count with ease-in: remap slider 25-100 to star count 1-5000
     const adjustedSlider = galaxyStars - 25 // 0-75 range
@@ -1180,35 +1243,12 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     if (adjustedSlider <= 1) {
       starCount = 1 // Single center point
     } else {
-      starCount = Math.max(1, Math.floor(easeIn * 5000)) // Scale to ~5000 with ease-in
+      starCount = Math.max(1, Math.floor(easeIn * maxStars))
     }
     
-    const positions = new Float32Array(starCount * 3)
-    const colors = new Float32Array(starCount * 3)
-    
-    for (let i = 0; i < starCount; i++) {
-      if (i === 0 && adjustedSlider <= 1) {
-        // First point at center
-        positions[0] = 0
-        positions[1] = 0
-        positions[2] = 0
-      } else {
-        // Random spherical distribution
-        const r = sphereRadius * Math.cbrt(Math.random()) // Cube root for volume distribution
-        const theta = Math.random() * Math.PI * 2
-        const phi = Math.acos(2 * Math.random() - 1)
-        
-        positions[i * 3] = r * Math.sin(phi) * Math.cos(theta)
-        positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta)
-        positions[i * 3 + 2] = r * Math.cos(phi)
-      }
-      
-      // Warm white colors
-      const colorVariation = Math.random()
-      colors[i * 3] = 0.9 + colorVariation * 0.1
-      colors[i * 3 + 1] = 0.85 + colorVariation * 0.15
-      colors[i * 3 + 2] = 0.8 + colorVariation * 0.2
-    }
+    // Use subset of pre-computed positions
+    const positions = starPoolRef.current.positions.slice(0, starCount * 3)
+    const colors = starPoolRef.current.colors.slice(0, starCount * 3)
     
     const geometry = new THREE.BufferGeometry()
     geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
@@ -2021,7 +2061,202 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     
     scene.add(group)
     curvedGroupRef.current = group
-  }, [curvedValue, showCurved, scene])
+  }, [curvedValue, showCurved, showProfiled, scene])
+
+  // Profiled effect - transform tube into lofted sculpture with cross-sections
+  const profiledGroupRef = useRef<THREE.Group | null>(null)
+  
+  useEffect(() => {
+    // Cleanup previous
+    if (profiledGroupRef.current) {
+      profiledGroupRef.current.traverse((obj) => {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.Line) {
+          obj.geometry?.dispose()
+          if (Array.isArray(obj.material)) {
+            obj.material.forEach(m => m.dispose())
+          } else if (obj.material) {
+            obj.material.dispose()
+          }
+        }
+      })
+      scene.remove(profiledGroupRef.current)
+      profiledGroupRef.current = null
+    }
+    
+    if (!showProfiled) return
+    
+    const group = new THREE.Group()
+    group.name = 'PROFILED_GROUP'
+    
+    const pathCorners = sculpturePathRef.current
+    const sculptureCurve = sculptureCurveRef.current
+    const crossSectionsGroup = crossSectionsRef.current
+    
+    if (pathCorners.length < 2 || sculptureCurve.length < 2) return
+    
+    // Get cross-section data
+    const crossSectionVertices: THREE.Vector3[][] = []
+    if (crossSectionsGroup) {
+      crossSectionsGroup.children.forEach(child => {
+        if (child instanceof THREE.LineLoop) {
+          const positions = child.geometry.getAttribute('position')
+          if (positions) {
+            const verts: THREE.Vector3[] = []
+            for (let i = 0; i < positions.count; i++) {
+              verts.push(new THREE.Vector3(
+                positions.getX(i),
+                positions.getY(i),
+                positions.getZ(i)
+              ))
+            }
+            crossSectionVertices.push(verts)
+          }
+        }
+      })
+    }
+    
+    if (crossSectionVertices.length === 0) return
+    
+    // Create the curve for sampling
+    const curve = new THREE.CatmullRomCurve3(sculptureCurve, true, 'catmullrom', 0.5)
+    
+    // Calculate animation phases
+    const overallProgress = profiledValue / 100
+    
+    // Phase 1: Color transition (0-25%) - red tube morphs to material color
+    const colorProgress = Math.min(1, overallProgress / 0.25)
+    
+    // Phase 2: Mesh growth sweep (25-100%) - lofted mesh travels along curve with scaling head
+    const meshSweepProgress = Math.max(0, Math.min(1, (overallProgress - 0.25) / 0.75))
+    
+    // Get sculpture material and interpolate color from red
+    const sculptureMat = materialController.getMaterial()
+    const redColor = new THREE.Color(0xff0000)
+    const targetColor = sculptureMat.color ? sculptureMat.color.clone() : new THREE.Color(0xcccccc)
+    const currentColor = redColor.clone().lerp(targetColor, colorProgress)
+    
+    // Interpolate material properties
+    const currentMetalness = 0.3 + (sculptureMat.metalness - 0.3) * colorProgress
+    const currentRoughness = 0.7 + (sculptureMat.roughness - 0.7) * colorProgress
+    
+    // Phase 1: Draw the curved tube with transitioning color (fades out as mesh grows)
+    if (meshSweepProgress < 1) {
+      const tubeOpacity = 1 - meshSweepProgress
+      const latticeConstant = latticeConstantRef.current
+      const maxSphereRadius = latticeConstant * 0.12
+      const pathTubeRadius = maxSphereRadius * 0.16 * 2
+      
+      const tubeMat = new THREE.MeshStandardMaterial({
+        color: currentColor,
+        metalness: currentMetalness,
+        roughness: currentRoughness,
+        transparent: true,
+        opacity: tubeOpacity
+      })
+      
+      const tubeGeo = new THREE.TubeGeometry(curve, sculptureCurve.length * 4, pathTubeRadius, 8, true)
+      const tubeMesh = new THREE.Mesh(tubeGeo, tubeMat)
+      tubeMesh.name = 'PROFILED_TUBE'
+      group.add(tubeMesh)
+    }
+    
+    // Phase 2: Traveling mesh with scaling growth effect
+    if (meshSweepProgress > 0 && crossSectionVertices.length >= 2) {
+      const numSections = crossSectionVertices.length
+      
+      // How far along the curve we've traveled (0 to numSections)
+      const travelPosition = meshSweepProgress * numSections
+      
+      // Number of sections to include in the mesh
+      const sectionsToInclude = Math.min(Math.ceil(travelPosition) + 1, numSections)
+      
+      // Build lofted geometry with scaling at the head
+      const loftVertices: number[] = []
+      const loftIndices: number[] = []
+      
+      // Taper settings as percentages of total curve length
+      const tipAheadPercent = 0.12  // Tip is ~12% ahead (between 10-15%)
+      const taperPercent = 0.30     // Scaling happens over 30% behind tip
+      
+      // Convert percentages to section counts
+      const tipAheadSections = numSections * tipAheadPercent
+      const taperSections = numSections * taperPercent
+      
+      for (let i = 0; i < sectionsToInclude; i++) {
+        const sectionVerts = crossSectionVertices[i]
+        if (!sectionVerts) continue
+        
+        // Calculate scale for this section
+        // Tip is ahead of travel position, scaling happens behind tip
+        // At meshSweepProgress = 1, all sections should be full size
+        let sectionScale = 1
+        
+        if (meshSweepProgress < 1) {
+          // Effective head position (tip is ahead)
+          const tipPosition = travelPosition + tipAheadSections
+          const distanceFromTip = tipPosition - i
+          
+          if (distanceFromTip < taperSections) {
+            // Smooth taper from 0 at tip to 1 at taperSections behind
+            sectionScale = Math.max(0, Math.min(1, distanceFromTip / taperSections))
+            // Apply easing for smoother taper
+            sectionScale = sectionScale * sectionScale * (3 - 2 * sectionScale) // smoothstep
+          }
+        }
+        
+        // Get section centroid
+        const centroid = new THREE.Vector3()
+        sectionVerts.forEach(v => centroid.add(v))
+        centroid.divideScalar(sectionVerts.length)
+        
+        // Add scaled vertices for this section
+        sectionVerts.forEach(v => {
+          const offset = v.clone().sub(centroid)
+          const scaled = centroid.clone().add(offset.multiplyScalar(sectionScale))
+          loftVertices.push(scaled.x, scaled.y, scaled.z)
+        })
+      }
+      
+      // Create faces between adjacent sections
+      const vertsPerSection = crossSectionVertices[0]?.length || 0
+      for (let i = 0; i < sectionsToInclude - 1; i++) {
+        const baseIdx = i * vertsPerSection
+        const nextBaseIdx = (i + 1) * vertsPerSection
+        
+        for (let j = 0; j < vertsPerSection; j++) {
+          const nextJ = (j + 1) % vertsPerSection
+          
+          // Two triangles per quad
+          loftIndices.push(baseIdx + j, nextBaseIdx + j, nextBaseIdx + nextJ)
+          loftIndices.push(baseIdx + j, nextBaseIdx + nextJ, baseIdx + nextJ)
+        }
+      }
+      
+      if (loftVertices.length > 0 && loftIndices.length > 0) {
+        const loftGeo = new THREE.BufferGeometry()
+        loftGeo.setAttribute('position', new THREE.Float32BufferAttribute(loftVertices, 3))
+        loftGeo.setIndex(loftIndices)
+        loftGeo.computeVertexNormals()
+        
+        // Use interpolated material for growing mesh, full material at end
+        const loftMat = meshSweepProgress >= 1 
+          ? sculptureMat.clone()
+          : new THREE.MeshStandardMaterial({
+              color: currentColor,
+              metalness: currentMetalness,
+              roughness: currentRoughness,
+              side: THREE.DoubleSide
+            })
+        
+        const loftMesh = new THREE.Mesh(loftGeo, loftMat)
+        loftMesh.name = 'PROFILED_LOFT'
+        group.add(loftMesh)
+      }
+    }
+    
+    scene.add(group)
+    profiledGroupRef.current = group
+  }, [profiledValue, showProfiled, scene])
 
   // Track cleanup frames after AR exit
   const arCleanupFramesRef = useRef(0)
@@ -2404,6 +2639,23 @@ export function AppLanding() {
   const [structureValue, setStructureValue] = useState(0)
   const [designCurvedModalOpen, setDesignCurvedModalOpen] = useState(false)
   const [curvedValue, setCurvedValue] = useState(0)
+  const [designProfiledModalOpen, setDesignProfiledModalOpen] = useState(false)
+  const [profiledValue, setProfiledValue] = useState(0)
+  const [designStoryModalOpen, setDesignStoryModalOpen] = useState(false)
+  const [storyValue, setStoryValue] = useState(0)
+  const [designAnimPlaying, setDesignAnimPlaying] = useState(false)
+  const designAnimRef = useRef<number | null>(null)
+  const [activeChapter, setActiveChapter] = useState<'points' | 'paths' | 'structure' | 'curved' | 'profiled' | 'story' | null>(null)
+  
+  // Per-chapter play durations in milliseconds
+  const chapterDurations = {
+    points: 10000,     // 10 seconds
+    paths: 10000,      // 10 seconds
+    structure: 15000,  // 15 seconds
+    curved: 10000,     // 10 seconds
+    profiled: 15000,   // 15 seconds
+    story: 90000       // 90 seconds total (1.5 minutes)
+  }
 
   useEffect(() => {
     if (!menuOpen) {
@@ -2514,6 +2766,124 @@ export function AppLanding() {
     const newValue = !autoRotate
     setAutoRotate(newValue)
     cameraController.setAutoRotate(newValue)
+  }
+
+  // Handle play button for design animations
+  const handleDesignPlayToggle = () => {
+    // If already playing, stop
+    if (designAnimPlaying) {
+      if (designAnimRef.current) {
+        cancelAnimationFrame(designAnimRef.current)
+        designAnimRef.current = null
+      }
+      setDesignAnimPlaying(false)
+      return
+    }
+
+    // Determine which slider to animate based on active chapter
+    let currentValue = 0
+    let setValue: (v: number) => void
+    let isStory = false
+
+    if (activeChapter === 'story') {
+      currentValue = storyValue
+      setValue = (v: number) => {
+        setStoryValue(v)
+        // Trigger the same logic as the Story slider onChange
+        if (v <= 20) {
+          const phaseProgress = (v / 20) * 100
+          setGalaxyStarsValue(phaseProgress)
+          setPathsValue(0)
+          setStructureValue(0)
+          setCurvedValue(0)
+          setDesignPathsModalOpen(false)
+          setDesignStructureModalOpen(false)
+          setDesignCurvedModalOpen(false)
+        } else if (v <= 40) {
+          const phaseProgress = ((v - 20) / 20) * 100
+          setGalaxyStarsValue(100)
+          setPathsValue(phaseProgress)
+          setStructureValue(0)
+          setCurvedValue(0)
+          setDesignPathsModalOpen(true)
+          setDesignStructureModalOpen(false)
+          setDesignCurvedModalOpen(false)
+        } else if (v <= 60) {
+          const phaseProgress = ((v - 40) / 20) * 100
+          setGalaxyStarsValue(100)
+          setPathsValue(100)
+          setStructureValue(phaseProgress)
+          setCurvedValue(0)
+          setDesignPathsModalOpen(true)
+          setDesignStructureModalOpen(true)
+          setDesignCurvedModalOpen(false)
+        } else if (v <= 80) {
+          const phaseProgress = ((v - 60) / 20) * 100
+          setGalaxyStarsValue(100)
+          setPathsValue(100)
+          setStructureValue(100)
+          setCurvedValue(phaseProgress)
+          setProfiledValue(0)
+          setDesignPathsModalOpen(true)
+          setDesignStructureModalOpen(true)
+          setDesignCurvedModalOpen(true)
+          setDesignProfiledModalOpen(false)
+        } else {
+          // Profiled phase (80-100%)
+          const phaseProgress = ((v - 80) / 20) * 100
+          setGalaxyStarsValue(100)
+          setPathsValue(100)
+          setStructureValue(100)
+          setCurvedValue(100)
+          setProfiledValue(phaseProgress)
+          setDesignPathsModalOpen(true)
+          setDesignStructureModalOpen(true)
+          setDesignCurvedModalOpen(true)
+          setDesignProfiledModalOpen(true)
+        }
+      }
+      isStory = true
+    } else if (activeChapter === 'profiled') {
+      currentValue = profiledValue
+      setValue = setProfiledValue
+    } else if (activeChapter === 'curved') {
+      currentValue = curvedValue
+      setValue = setCurvedValue
+    } else if (activeChapter === 'structure') {
+      currentValue = structureValue
+      setValue = setStructureValue
+    } else if (activeChapter === 'paths') {
+      currentValue = pathsValue
+      setValue = setPathsValue
+    } else if (activeChapter === 'points') {
+      currentValue = galaxyStarsValue
+      setValue = setGalaxyStarsValue
+    } else {
+      return // No chapter selected
+    }
+
+    // Start animation
+    setDesignAnimPlaying(true)
+    const startTime = performance.now()
+    const duration = activeChapter ? chapterDurations[activeChapter] : 10000
+    const startValue = currentValue
+
+    const animate = (time: number) => {
+      const elapsed = time - startTime
+      const progress = Math.min(elapsed / duration, 1)
+      const newValue = startValue + (100 - startValue) * progress
+
+      setValue(newValue)
+
+      if (progress < 1) {
+        designAnimRef.current = requestAnimationFrame(animate)
+      } else {
+        setDesignAnimPlaying(false)
+        designAnimRef.current = null
+      }
+    }
+
+    designAnimRef.current = requestAnimationFrame(animate)
   }
 
   const handlePlayCameraAnimation = (settings: CameraAnimationSettings) => {
@@ -2632,7 +3002,7 @@ export function AppLanding() {
         }}
       >
         {debugMode ? (
-          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} smoothCameraAnim={smoothCameraAnim} onSmoothAnimComplete={handleSmoothAnimComplete} showHull={showHull} arController={arControllerRef.current} sceneResetTrigger={sceneResetTrigger} galaxyStars={galaxyStarsValue} showPoints={designPointsModalOpen} pathsValue={pathsValue} showPaths={designPathsModalOpen} structureValue={structureValue} showStructure={designStructureModalOpen} curvedValue={curvedValue} showCurved={designCurvedModalOpen} />
+          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} smoothCameraAnim={smoothCameraAnim} onSmoothAnimComplete={handleSmoothAnimComplete} showHull={showHull} arController={arControllerRef.current} sceneResetTrigger={sceneResetTrigger} galaxyStars={galaxyStarsValue} showPoints={designPointsModalOpen} pathsValue={pathsValue} showPaths={designPathsModalOpen} structureValue={structureValue} showStructure={designStructureModalOpen} curvedValue={curvedValue} showCurved={designCurvedModalOpen} profiledValue={profiledValue} showProfiled={designProfiledModalOpen} />
         ) : (
           <SculptureScene onSculptureLoaded={handleSculptureLoaded} />
         )}
@@ -2680,11 +3050,12 @@ export function AppLanding() {
               </button>
               {designExpanded && (
                 <div style={{ paddingLeft: '12px', background: 'rgba(0,0,0,0.3)' }}>
-                  <button style={styles.dropdownItem} onClick={() => { setDesignPointsModalOpen(true); setMenuOpen(false); }}>Points</button>
-                  <button style={styles.dropdownItem} onClick={() => { setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setMenuOpen(false); }}>Paths</button>
-                  <button style={styles.dropdownItem} onClick={() => { setDesignStructureModalOpen(true); setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setPathsValue(100); setMenuOpen(false); }}>Structure</button>
-                  <button style={styles.dropdownItem} onClick={() => { setDesignCurvedModalOpen(true); setDesignStructureModalOpen(true); setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setPathsValue(100); setStructureValue(100); setMenuOpen(false); }}>Curved</button>
-                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Profiled</button>
+                  <button style={styles.dropdownItem} onClick={() => { setDesignPointsModalOpen(true); setActiveChapter('points'); setMenuOpen(false); }}>Points</button>
+                  <button style={styles.dropdownItem} onClick={() => { setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setActiveChapter('paths'); setMenuOpen(false); }}>Paths</button>
+                  <button style={styles.dropdownItem} onClick={() => { setDesignStructureModalOpen(true); setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setPathsValue(100); setActiveChapter('structure'); setMenuOpen(false); }}>Structure</button>
+                  <button style={styles.dropdownItem} onClick={() => { setDesignCurvedModalOpen(true); setDesignStructureModalOpen(true); setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setPathsValue(100); setStructureValue(100); setActiveChapter('curved'); setMenuOpen(false); }}>Curved</button>
+                  <button style={styles.dropdownItem} onClick={() => { setDesignProfiledModalOpen(true); setDesignCurvedModalOpen(true); setDesignStructureModalOpen(true); setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setPathsValue(100); setStructureValue(100); setCurvedValue(100); setActiveChapter('profiled'); setMenuOpen(false); }}>Profiled</button>
+                  <button style={styles.dropdownItem} onClick={() => { setDesignStoryModalOpen(true); setDesignPointsModalOpen(true); setStoryValue(0); setActiveChapter('story'); setMenuOpen(false); }}>Story</button>
                 </div>
               )}
             </div>
@@ -2723,8 +3094,8 @@ export function AppLanding() {
         )}
       </div>
 
-      {/* Galaxy Stars slider - shows when Points is selected but NOT Paths */}
-      {designPointsModalOpen && !designPathsModalOpen && (
+      {/* Galaxy Stars slider - shows when Points chapter is active */}
+      {activeChapter === 'points' && (
         <div style={styles.galaxySliderContainer}>
           <input
             type="range"
@@ -2744,8 +3115,8 @@ export function AppLanding() {
         </div>
       )}
 
-      {/* Paths slider - shows when Paths is selected but NOT Structure */}
-      {designPathsModalOpen && !designStructureModalOpen && (
+      {/* Paths slider - shows when Paths chapter is active */}
+      {activeChapter === 'paths' && (
         <div style={styles.galaxySliderContainer}>
           <input
             type="range"
@@ -2765,8 +3136,8 @@ export function AppLanding() {
         </div>
       )}
 
-      {/* Structure slider - shows when Structure is selected but NOT Curved */}
-      {designStructureModalOpen && !designCurvedModalOpen && (
+      {/* Structure slider - shows when Structure chapter is active */}
+      {activeChapter === 'structure' && (
         <div style={styles.galaxySliderContainer}>
           <input
             type="range"
@@ -2786,8 +3157,8 @@ export function AppLanding() {
         </div>
       )}
 
-      {/* Curved slider - shows when Curved is selected */}
-      {designCurvedModalOpen && (
+      {/* Curved slider - shows when Curved chapter is active */}
+      {activeChapter === 'curved' && (
         <div style={styles.galaxySliderContainer}>
           <input
             type="range"
@@ -2807,14 +3178,132 @@ export function AppLanding() {
         </div>
       )}
 
-      {/* Auto-rotate triangle button bottom right */}
+      {/* Profiled slider - shows when Profiled chapter is active */}
+      {activeChapter === 'profiled' && (
+        <div style={styles.galaxySliderContainer}>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={profiledValue}
+            onChange={(e) => setProfiledValue(Number(e.target.value))}
+            style={styles.galaxySlider}
+          />
+          <button
+            style={styles.infoButton}
+            onClick={() => {}}
+            title="Info"
+          >
+            i
+          </button>
+        </div>
+      )}
+
+      {/* Story slider - shows when Story chapter is active */}
+      {activeChapter === 'story' && (
+        <div style={styles.galaxySliderContainer}>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={storyValue}
+            onChange={(e) => {
+              const val = Number(e.target.value)
+              setStoryValue(val)
+              
+              // Map story value to sequential phases (5 phases, 20% each):
+              // 0-20: Points (galaxyStarsValue 0-100)
+              // 20-40: Paths (pathsValue 0-100)
+              // 40-60: Structure (structureValue 0-100)
+              // 60-80: Curved (curvedValue 0-100)
+              // 80-100: Profiled (profiledValue 0-100)
+              
+              if (val <= 20) {
+                // Points phase
+                const phaseProgress = (val / 20) * 100
+                setGalaxyStarsValue(phaseProgress)
+                setPathsValue(0)
+                setStructureValue(0)
+                setCurvedValue(0)
+                setProfiledValue(0)
+                setDesignPathsModalOpen(false)
+                setDesignStructureModalOpen(false)
+                setDesignCurvedModalOpen(false)
+                setDesignProfiledModalOpen(false)
+              } else if (val <= 40) {
+                // Paths phase
+                const phaseProgress = ((val - 20) / 20) * 100
+                setGalaxyStarsValue(100)
+                setPathsValue(phaseProgress)
+                setStructureValue(0)
+                setCurvedValue(0)
+                setProfiledValue(0)
+                setDesignPathsModalOpen(true)
+                setDesignStructureModalOpen(false)
+                setDesignCurvedModalOpen(false)
+                setDesignProfiledModalOpen(false)
+              } else if (val <= 60) {
+                // Structure phase
+                const phaseProgress = ((val - 40) / 20) * 100
+                setGalaxyStarsValue(100)
+                setPathsValue(100)
+                setStructureValue(phaseProgress)
+                setCurvedValue(0)
+                setProfiledValue(0)
+                setDesignPathsModalOpen(true)
+                setDesignStructureModalOpen(true)
+                setDesignCurvedModalOpen(false)
+                setDesignProfiledModalOpen(false)
+              } else if (val <= 80) {
+                // Curved phase
+                const phaseProgress = ((val - 60) / 20) * 100
+                setGalaxyStarsValue(100)
+                setPathsValue(100)
+                setStructureValue(100)
+                setCurvedValue(phaseProgress)
+                setProfiledValue(0)
+                setDesignPathsModalOpen(true)
+                setDesignStructureModalOpen(true)
+                setDesignCurvedModalOpen(true)
+                setDesignProfiledModalOpen(false)
+              } else {
+                // Profiled phase
+                const phaseProgress = ((val - 80) / 20) * 100
+                setGalaxyStarsValue(100)
+                setPathsValue(100)
+                setStructureValue(100)
+                setCurvedValue(100)
+                setProfiledValue(phaseProgress)
+                setDesignPathsModalOpen(true)
+                setDesignStructureModalOpen(true)
+                setDesignCurvedModalOpen(true)
+                setDesignProfiledModalOpen(true)
+              }
+            }}
+            style={styles.galaxySlider}
+          />
+          <button
+            style={styles.infoButton}
+            onClick={() => {}}
+            title="Info"
+          >
+            i
+          </button>
+        </div>
+      )}
+
+      {/* Play button bottom right - plays design animation when chapter is selected, otherwise auto-rotate */}
       <button
-        style={{ ...styles.autoRotateButton, background: autoRotate ? '#4488ff' : 'rgba(0,0,0,0.7)' }}
-        onClick={handleAutoRotateToggle}
-        title="Auto Rotate"
+        style={{ ...styles.autoRotateButton, background: (designAnimPlaying || autoRotate) ? '#4488ff' : 'rgba(0,0,0,0.7)' }}
+        onClick={activeChapter ? handleDesignPlayToggle : handleAutoRotateToggle}
+        title={activeChapter ? (designAnimPlaying ? "Pause" : "Play") : "Auto Rotate"}
       >
         <svg width="24" height="24" viewBox="0 0 24 24" fill="currentColor">
-          <path d="M8 5v14l11-7z" />
+          {designAnimPlaying ? (
+            <path d="M6 4h4v16H6V4zm8 0h4v16h-4V4z" />
+          ) : (
+            <path d="M8 5v14l11-7z" />
+          )}
         </svg>
       </button>
 
