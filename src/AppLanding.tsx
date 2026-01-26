@@ -52,6 +52,10 @@ interface DebugSceneProps {
   showPoints: boolean
   pathsValue: number
   showPaths: boolean
+  structureValue: number
+  showStructure: boolean
+  curvedValue: number
+  showCurved: boolean
 }
 
 // Detect lattice type from corner distances and angles
@@ -252,7 +256,7 @@ function generateLatticePoints(
   return points
 }
 
-function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed, smoothCameraAnim, onSmoothAnimComplete, showHull, arController, sceneResetTrigger, galaxyStars, showPoints, pathsValue, showPaths }: DebugSceneProps) {
+function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotateSpeed, sphereRadius, starDensity, cosmicScale, bondDensity, starScale, galaxySize, cameraViewpoint, cameraFov, useGpu, onCameraViewpointsComputed, smoothCameraAnim, onSmoothAnimComplete, showHull, arController, sceneResetTrigger, galaxyStars, showPoints, pathsValue, showPaths, structureValue, showStructure, curvedValue, showCurved }: DebugSceneProps) {
   const { scene, gl, camera } = useThree()
   
   // Set up AR controller with renderer, scene, and camera
@@ -402,6 +406,15 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
             pathCorners.push(v.clone())
           }
         })
+      }
+      
+      // Store path corners for Paths effect
+      sculpturePathRef.current = pathCorners
+      
+      // Store sculpture curve for Curved effect
+      if (objData.sculptureCurve && objData.sculptureCurve.length > 0) {
+        sculptureCurveRef.current = objData.sculptureCurve.map(v => v.clone())
+        console.info(`[Path] Stored sculptureCurve with ${sculptureCurveRef.current.length} points`)
       }
       
       // Calculate centroids for each section (the heartline)
@@ -1231,9 +1244,13 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     galaxyStarsRef.current = stars
   }, [galaxyStars, showPoints, scene])
 
-  // Paths effect - connects actual star points
-  const pathsLinesRef = useRef<THREE.LineSegments | null>(null)
+  // Paths effect - animated paths through star field
+  const pathsGroupRef = useRef<THREE.Group | null>(null)
   const galaxyStarPositionsRef = useRef<THREE.Vector3[]>([])
+  const shootingStarsRef = useRef<{ line: THREE.Line, start: THREE.Vector3, end: THREE.Vector3, progress: number, speed: number }[]>([])
+  const animatedShapesRef = useRef<{ line: THREE.Line, points: THREE.Vector3[], progress: number, speed: number, segmentIndex: number }[]>([])
+  const sculpturePathRef = useRef<THREE.Vector3[]>([])
+  const sculptureCurveRef = useRef<THREE.Vector3[]>([])
   
   // Store star positions when galaxy stars are created
   useEffect(() => {
@@ -1253,142 +1270,758 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     }
   }, [galaxyStars, showPoints])
   
-  // Create paths based on slider value - connecting actual star points
+  // Constellation patterns
+  const constellations = {
+    bigDipper: [
+      [0, 0, 0], [1.5, 0.2, 0.5], [2.8, 0.5, 0.8], [4.2, 0.3, 0.4],
+      [5.2, -0.8, 0.2], [5.8, 0.8, 0.6], [7.0, 1.0, 0.3]
+    ],
+    orion: [
+      [0, 2, 0], [1, 1, 0], [2, 0, 0], [1, -1, 0], [0, -2, 0], // belt and body
+      [-1, 1.5, 0], [2.5, 1.5, 0] // shoulders
+    ],
+    triangle: [[0, 1, 0], [1, -0.5, 0], [-1, -0.5, 0], [0, 1, 0]],
+    square: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 0]],
+    pentagon: [[0, 1, 0], [0.95, 0.31, 0], [0.59, -0.81, 0], [-0.59, -0.81, 0], [-0.95, 0.31, 0], [0, 1, 0]]
+  }
+  
+  // Setup paths based on slider phase
   useEffect(() => {
-    // Remove existing paths
-    if (pathsLinesRef.current) {
-      scene.remove(pathsLinesRef.current)
-      pathsLinesRef.current.geometry.dispose()
-      ;(pathsLinesRef.current.material as THREE.LineBasicMaterial).dispose()
-      pathsLinesRef.current = null
+    // Cleanup existing
+    if (pathsGroupRef.current) {
+      scene.remove(pathsGroupRef.current)
+      pathsGroupRef.current.traverse((obj) => {
+        if (obj instanceof THREE.Line || obj instanceof THREE.LineSegments) {
+          obj.geometry.dispose()
+          ;(obj.material as THREE.Material).dispose()
+        }
+      })
+      pathsGroupRef.current = null
     }
+    shootingStarsRef.current = []
+    animatedShapesRef.current = []
     
     if (!showPaths || pathsValue === 0) return
     
+    const group = new THREE.Group()
+    group.name = 'PATHS_GROUP'
     const stars = galaxyStarPositionsRef.current
-    if (stars.length < 2) return
+    const sphereRadius = sculptureRadiusRef.current * 3
     
-    const linePositions: number[] = []
-    
-    // Helper to find nearest neighbor
-    const findNearestNeighbor = (starIdx: number, excludeSet: Set<number>): number => {
-      let nearestIdx = -1
-      let nearestDist = Infinity
-      const star = stars[starIdx]
-      for (let i = 0; i < stars.length; i++) {
-        if (i === starIdx || excludeSet.has(i)) continue
-        const dist = star.distanceTo(stars[i])
-        if (dist < nearestDist) {
-          nearestDist = dist
-          nearestIdx = i
-        }
+    if (pathsValue <= 20) {
+      // Phase 1: Shooting stars (0-20%)
+      const numShooters = Math.floor((pathsValue / 20) * 8) + 1
+      for (let i = 0; i < numShooters; i++) {
+        const startIdx = Math.floor(Math.random() * Math.max(1, stars.length))
+        const start = stars.length > 0 ? stars[startIdx].clone() : new THREE.Vector3(
+          (Math.random() - 0.5) * sphereRadius * 2,
+          (Math.random() - 0.5) * sphereRadius * 2,
+          (Math.random() - 0.5) * sphereRadius * 2
+        )
+        const direction = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize()
+        const end = start.clone().add(direction.multiplyScalar(sphereRadius * 0.5))
+        
+        const geometry = new THREE.BufferGeometry().setFromPoints([start, start])
+        const material = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 })
+        const line = new THREE.Line(geometry, material)
+        group.add(line)
+        
+        shootingStarsRef.current.push({ line, start, end, progress: Math.random(), speed: 0.3 + Math.random() * 0.5 })
       }
-      return nearestIdx
+    } else if (pathsValue <= 40) {
+      // Phase 2: Growing paths (20-40%) - 2 to 10 segments
+      const progress = (pathsValue - 20) / 20
+      const numSegments = Math.floor(progress * 8) + 2
+      const numPaths = Math.floor(progress * 4) + 1
+      
+      for (let p = 0; p < numPaths; p++) {
+        const pathPoints: THREE.Vector3[] = []
+        let currentPos = stars.length > 0 
+          ? stars[Math.floor(Math.random() * stars.length)].clone()
+          : new THREE.Vector3((Math.random() - 0.5) * sphereRadius, (Math.random() - 0.5) * sphereRadius, (Math.random() - 0.5) * sphereRadius)
+        pathPoints.push(currentPos.clone())
+        
+        for (let s = 0; s < numSegments; s++) {
+          const direction = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize()
+          currentPos = currentPos.clone().add(direction.multiplyScalar(sphereRadius * 0.15))
+          pathPoints.push(currentPos.clone())
+        }
+        
+        const geometry = new THREE.BufferGeometry().setFromPoints(pathPoints)
+        const material = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 })
+        const line = new THREE.Line(geometry, material)
+        group.add(line)
+      }
+    } else if (pathsValue <= 55) {
+      // Phase 3a: Geometric shapes (40-55%) - animated drawing
+      const progress = (pathsValue - 40) / 15
+      const shapes = [constellations.triangle, constellations.square, constellations.pentagon]
+      const numShapes = Math.floor(progress * 3) + 1
+      
+      for (let i = 0; i < numShapes; i++) {
+        const shape = shapes[i % shapes.length]
+        const scale = sphereRadius * 0.3
+        const offset = new THREE.Vector3(
+          (Math.random() - 0.5) * sphereRadius,
+          (Math.random() - 0.5) * sphereRadius,
+          (Math.random() - 0.5) * sphereRadius
+        )
+        const points = shape.map(p => new THREE.Vector3(p[0] * scale + offset.x, p[1] * scale + offset.y, p[2] * scale + offset.z))
+        
+        // Start with empty line, will be animated
+        const geometry = new THREE.BufferGeometry().setFromPoints([points[0], points[0]])
+        const material = new THREE.LineBasicMaterial({ color: 0x88aaff, transparent: true, opacity: 0.8 })
+        const line = new THREE.Line(geometry, material)
+        group.add(line)
+        
+        animatedShapesRef.current.push({ line, points, progress: Math.random(), speed: 0.15 + Math.random() * 0.1, segmentIndex: 0 })
+      }
+    } else if (pathsValue <= 70) {
+      // Phase 3b: Constellations (55-70%) - animated drawing
+      const progress = (pathsValue - 55) / 15
+      const scale = sphereRadius * 0.15
+      
+      // Big Dipper
+      if (progress > 0) {
+        const offset = new THREE.Vector3(-sphereRadius * 0.3, sphereRadius * 0.2, 0)
+        const points = constellations.bigDipper.map(p => new THREE.Vector3(p[0] * scale + offset.x, p[1] * scale + offset.y, p[2] * scale + offset.z))
+        const geometry = new THREE.BufferGeometry().setFromPoints([points[0], points[0]])
+        const material = new THREE.LineBasicMaterial({ color: 0xffffaa, transparent: true, opacity: 0.8 })
+        const line = new THREE.Line(geometry, material)
+        group.add(line)
+        animatedShapesRef.current.push({ line, points, progress: 0, speed: 0.12, segmentIndex: 0 })
+      }
+      
+      // Orion
+      if (progress > 0.5) {
+        const offset = new THREE.Vector3(sphereRadius * 0.3, -sphereRadius * 0.1, sphereRadius * 0.2)
+        const points = constellations.orion.map(p => new THREE.Vector3(p[0] * scale + offset.x, p[1] * scale + offset.y, p[2] * scale + offset.z))
+        const geometry = new THREE.BufferGeometry().setFromPoints([points[0], points[0]])
+        const material = new THREE.LineBasicMaterial({ color: 0xffaaaa, transparent: true, opacity: 0.8 })
+        const line = new THREE.Line(geometry, material)
+        group.add(line)
+        animatedShapesRef.current.push({ line, points, progress: 0, speed: 0.1, segmentIndex: 0 })
+      }
+    } else {
+      // Phase 4: Sculpture path reveal (70-100%)
+      const progress = (pathsValue - 70) / 30
+      
+      // Use actual sculpture path corners if available
+      const pathCorners = sculpturePathRef.current.length > 0 ? sculpturePathRef.current : []
+      
+      if (pathCorners.length >= 2) {
+        // Incremental reveal: show segments 1, then 1-2, then 1-2-3, etc.
+        // Close the path by adding first point at end
+        const closedPath = [...pathCorners, pathCorners[0]]
+        const totalSegments = closedPath.length - 1
+        const revealCycles = 3 // Number of times we restart
+        const cycleProgress = progress * revealCycles
+        const currentCycle = Math.floor(cycleProgress)
+        const withinCycle = cycleProgress - currentCycle
+        
+        const segmentsToShow = currentCycle >= revealCycles - 1 
+          ? totalSegments // Final cycle shows all
+          : Math.floor(withinCycle * totalSegments) + 1
+        
+        const points: THREE.Vector3[] = []
+        for (let i = 0; i <= Math.min(segmentsToShow, totalSegments); i++) {
+          points.push(closedPath[i].clone())
+        }
+        
+        if (points.length >= 2) {
+          const geometry = new THREE.BufferGeometry().setFromPoints(points)
+          const material = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, linewidth: 3 })
+          const line = new THREE.Line(geometry, material)
+          line.name = 'SCULPTURE_PATH'
+          group.add(line)
+        }
+      } else {
+        // Fallback: spiral if no sculpture path
+        const numSegments = Math.floor(progress * 50) + 5
+        const points: THREE.Vector3[] = []
+        for (let i = 0; i <= numSegments; i++) {
+          const t = i / numSegments
+          const angle = t * Math.PI * 4
+          const y = (t - 0.5) * sculptureRadiusRef.current * 2
+          const r = sculptureRadiusRef.current * 0.3
+          points.push(new THREE.Vector3(Math.cos(angle) * r, y, Math.sin(angle) * r))
+        }
+        const geometry = new THREE.BufferGeometry().setFromPoints(points)
+        const material = new THREE.LineBasicMaterial({ color: 0x00ffaa, transparent: true, opacity: 0.9 })
+        group.add(new THREE.Line(geometry, material))
+      }
     }
     
-    if (pathsValue <= 30) {
-      // 0-30%: Random short paths between nearby star pairs
-      const numPairs = Math.min(Math.floor((pathsValue / 30) * 50), Math.floor(stars.length / 2))
-      const usedStars = new Set<number>()
-      
-      for (let i = 0; i < numPairs && usedStars.size < stars.length - 1; i++) {
-        // Pick a random unused star
-        let starIdx = Math.floor(Math.random() * stars.length)
-        while (usedStars.has(starIdx)) {
-          starIdx = (starIdx + 1) % stars.length
+    scene.add(group)
+    pathsGroupRef.current = group
+  }, [pathsValue, showPaths, scene, galaxyStars])
+
+  // Structure effect - lattice formation from stars
+  const structureGroupRef = useRef<THREE.Group | null>(null)
+  const structureNodesRef = useRef<{ star: THREE.Vector3, target: THREE.Vector3, current: THREE.Vector3 }[]>([])
+  
+  useEffect(() => {
+    // Cleanup existing structure
+    if (structureGroupRef.current) {
+      scene.remove(structureGroupRef.current)
+      structureGroupRef.current.traverse((obj) => {
+        if (obj instanceof THREE.Points || obj instanceof THREE.Line || obj instanceof THREE.LineSegments) {
+          obj.geometry.dispose()
+          if (Array.isArray(obj.material)) {
+            obj.material.forEach(m => m.dispose())
+          } else {
+            (obj.material as THREE.Material).dispose()
+          }
         }
-        usedStars.add(starIdx)
-        
-        // Find its nearest neighbor
-        const neighborIdx = findNearestNeighbor(starIdx, usedStars)
-        if (neighborIdx >= 0) {
-          usedStars.add(neighborIdx)
-          const s1 = stars[starIdx]
-          const s2 = stars[neighborIdx]
-          linePositions.push(s1.x, s1.y, s1.z, s2.x, s2.y, s2.z)
+      })
+      structureGroupRef.current = null
+    }
+    structureNodesRef.current = []
+    
+    if (!showStructure || structureValue === 0 || showCurved) return
+    
+    const group = new THREE.Group()
+    group.name = 'STRUCTURE_GROUP'
+    
+    // Calculate sculpture path centroid
+    const pathCorners = sculpturePathRef.current
+    const pathCenter = new THREE.Vector3()
+    if (pathCorners.length > 0) {
+      pathCorners.forEach(p => pathCenter.add(p))
+      pathCenter.divideScalar(pathCorners.length)
+    }
+    
+    // Filter lattice points to 2x sculpture spherical volume, centered on sculpture path
+    const sculptureRadius = sculptureRadiusRef.current
+    const latticeRadius = sculptureRadius * 2
+    const allLatticePoints = latticePointsRef.current
+    const latticePoints = allLatticePoints.filter(p => p.distanceTo(pathCenter) < latticeRadius)
+    
+    const starPositions = galaxyStarPositionsRef.current
+    const latticeType = latticeTypeRef.current
+    const latticeConstant = latticeConstantRef.current
+    
+    console.info(`[Structure] latticePoints=${latticePoints.length}, starPositions=${starPositions.length}, latticeConstant=${latticeConstant.toFixed(3)}, latticeType=${latticeType}`)
+    
+    if (latticePoints.length === 0 || starPositions.length === 0) return
+    
+    // Phase 1 (0-25%): Show bonds, fade unused stars
+    // Phase 2 (25-50%): Continue fading, show lattice bonds
+    // Phase 3 (50-90%): Pull toward lattice
+    // Phase 4 (90-100%): Final form with spheres
+    
+    // Select stars closest to each lattice point
+    const selectedStars: { star: THREE.Vector3, target: THREE.Vector3 }[] = []
+    const usedStarIndices = new Set<number>()
+    
+    for (const latticePoint of latticePoints) {
+      let closestIdx = -1
+      let closestDist = Infinity
+      for (let i = 0; i < starPositions.length; i++) {
+        if (usedStarIndices.has(i)) continue
+        const dist = starPositions[i].distanceTo(latticePoint)
+        if (dist < closestDist) {
+          closestDist = dist
+          closestIdx = i
         }
       }
-    } else if (pathsValue <= 60) {
-      // 30-60%: Form constellation-like patterns (clusters of connected stars)
-      const progress = (pathsValue - 30) / 30
-      const numClusters = Math.floor(progress * 5) + 1
-      const starsPerCluster = Math.floor(progress * 7) + 3
+      if (closestIdx >= 0) {
+        usedStarIndices.add(closestIdx)
+        selectedStars.push({ star: starPositions[closestIdx].clone(), target: latticePoint.clone() })
+      }
+    }
+    
+    // Calculate interpolation based on slider phase
+    let pullProgress = 0
+    
+    // Scale sphere size relative to lattice constant for proper proportions
+    const maxSphereRadius = latticeConstant * 0.12 // 80% of 0.15
+    let sphereRadiusFactor = 0 // Start invisible
+    let pathTubeFactor = 0 // Sculpture path tube growth factor
+    
+    if (structureValue <= 25) {
+      // Phase 1: Show bold sculpture path growing to full diameter
+      const p = structureValue / 25
+      pathTubeFactor = p // Path grows to full size
+      pullProgress = 0
+      sphereRadiusFactor = 0 // Spheres not visible yet
+    } else if (structureValue <= 50) {
+      // Phase 2: Path at full size, start showing lattice spheres
+      const p = (structureValue - 25) / 25
+      pathTubeFactor = 1 // Path stays at full size
+      pullProgress = 0
+      sphereRadiusFactor = p * 0.3 // Spheres fade in to 30%
+    } else if (structureValue <= 90) {
+      // Phase 3: Pull stars toward lattice positions
+      const p = (structureValue - 50) / 40
+      pathTubeFactor = 1
+      pullProgress = p * p // Ease-in pull
+      sphereRadiusFactor = 0.3 + p * 0.7 // Grow to 100%
+    } else {
+      // Phase 4: Final form
+      pathTubeFactor = 1
+      pullProgress = 1
+      sphereRadiusFactor = 1.0 // Full size
+    }
+    
+    const sphereRadius = maxSphereRadius * sphereRadiusFactor
+    
+    // Create current positions based on pull progress
+    const currentPositions: THREE.Vector3[] = selectedStars.map(s => {
+      const current = new THREE.Vector3().lerpVectors(s.star, s.target, pullProgress)
+      structureNodesRef.current.push({ star: s.star, target: s.target, current })
+      return current
+    })
+    
+    // Draw non-selected stars (fading out) - completely gone by 80% of slider
+    const fadeProgress = Math.min(1, structureValue / 80) // Fully faded by 80%
+    const adjustedNonNodeOpacity = Math.max(0, 1 - fadeProgress)
+    
+    if (adjustedNonNodeOpacity > 0.01) {
+      const nonSelectedPositions: number[] = []
+      for (let i = 0; i < starPositions.length; i++) {
+        if (!usedStarIndices.has(i)) {
+          nonSelectedPositions.push(starPositions[i].x, starPositions[i].y, starPositions[i].z)
+        }
+      }
+      if (nonSelectedPositions.length > 0) {
+        const nonSelectedGeo = new THREE.BufferGeometry()
+        nonSelectedGeo.setAttribute('position', new THREE.Float32BufferAttribute(nonSelectedPositions, 3))
+        const nonSelectedMat = new THREE.PointsMaterial({ color: 0x666666, size: 0.3, transparent: true, opacity: adjustedNonNodeOpacity })
+        group.add(new THREE.Points(nonSelectedGeo, nonSelectedMat))
+      }
+    }
+    
+    // Draw lattice nodes as spheres using InstancedMesh with sculpture material (fully opaque)
+    if (currentPositions.length > 0 && sphereRadiusFactor > 0.01) {
+      const sphereGeo = new THREE.SphereGeometry(sphereRadius, 16, 12)
+      const sphereMat = materialController.getMaterial().clone()
+      sphereMat.transparent = false
+      sphereMat.opacity = 1
+      const sphereMesh = new THREE.InstancedMesh(sphereGeo, sphereMat, currentPositions.length)
+      sphereMesh.name = 'LATTICE_SPHERES'
       
-      for (let c = 0; c < numClusters; c++) {
-        // Pick a random starting star for this cluster
-        const startIdx = Math.floor(Math.random() * stars.length)
-        const clusterStars = new Set<number>([startIdx])
-        let currentIdx = startIdx
-        
-        // Build a chain of connected stars
-        for (let i = 0; i < starsPerCluster - 1; i++) {
-          const nextIdx = findNearestNeighbor(currentIdx, clusterStars)
-          if (nextIdx >= 0) {
-            const s1 = stars[currentIdx]
-            const s2 = stars[nextIdx]
-            linePositions.push(s1.x, s1.y, s1.z, s2.x, s2.y, s2.z)
-            clusterStars.add(nextIdx)
-            currentIdx = nextIdx
+      const dummy = new THREE.Object3D()
+      currentPositions.forEach((p, i) => {
+        dummy.position.copy(p)
+        dummy.scale.setScalar(1)
+        dummy.updateMatrix()
+        sphereMesh.setMatrixAt(i, dummy.matrix)
+      })
+      sphereMesh.instanceMatrix.needsUpdate = true
+      group.add(sphereMesh)
+    }
+    
+    // Draw bonds between FCC lattice neighbors as tubes (only after phase 1)
+    // Use TARGET (lattice) positions to determine neighbors, draw at CURRENT positions
+    if (selectedStars.length > 1 && sphereRadiusFactor > 0.01) {
+      const bondPairs: { start: THREE.Vector3, end: THREE.Vector3 }[] = []
+      
+      // Neighbor distance is the lattice constant (grid spacing)
+      const neighborDist = latticeConstant * 1.1 // Small tolerance for floating point
+      console.info(`[Structure] latticeConstant=${latticeConstant.toFixed(3)}, neighborDist=${neighborDist.toFixed(3)}, selectedStars=${selectedStars.length}`)
+      
+      // Check neighbor relationships using TARGET (lattice) positions
+      for (let i = 0; i < selectedStars.length; i++) {
+        for (let j = i + 1; j < selectedStars.length; j++) {
+          const targetDist = selectedStars[i].target.distanceTo(selectedStars[j].target)
+          if (targetDist < neighborDist) {
+            // Draw bond at CURRENT (interpolated) positions
+            bondPairs.push({ start: currentPositions[i], end: currentPositions[j] })
           }
         }
       }
-    } else if (pathsValue <= 90) {
-      // 60-90%: Paths converging toward sculpture center
-      const progress = (pathsValue - 60) / 30
-      const center = new THREE.Vector3(0, 0, 0)
-      const numPaths = Math.floor(progress * stars.length * 0.3) + 5
       
-      // Sort stars by distance from center
-      const sortedStars = [...stars].sort((a, b) => a.distanceTo(center) - b.distanceTo(center))
+      console.info(`[Structure] Drawing ${bondPairs.length} bonds, sphereRadius=${sphereRadius.toFixed(3)}, neighborDist=${neighborDist.toFixed(3)}`)
       
-      // Connect outer stars toward inner stars
-      for (let i = 0; i < numPaths && i < sortedStars.length - 1; i++) {
-        const outerIdx = sortedStars.length - 1 - i
-        const innerIdx = Math.floor(outerIdx * (1 - progress * 0.5))
-        if (innerIdx >= 0 && innerIdx < outerIdx) {
-          const s1 = sortedStars[outerIdx]
-          const s2 = sortedStars[innerIdx]
-          linePositions.push(s1.x, s1.y, s1.z, s2.x, s2.y, s2.z)
-        }
-      }
-    } else {
-      // 90-100%: Display final sculpture path (heartline)
-      const finalProgress = (pathsValue - 90) / 10
-      const numSegments = Math.floor(finalProgress * 50) + 10
-      const heightRange = sculptureRadiusRef.current * 2
-      const radius = sculptureRadiusRef.current * 0.3
-      
-      for (let i = 0; i < numSegments; i++) {
-        const t1 = i / numSegments
-        const t2 = (i + 1) / numSegments
-        const angle1 = t1 * Math.PI * 4
-        const angle2 = t2 * Math.PI * 4
-        const y1 = (t1 - 0.5) * heightRange
-        const y2 = (t2 - 0.5) * heightRange
+      if (bondPairs.length > 0) {
+        const tubeRadius = sphereRadius * 0.16 // 80% of 0.2 (20% of sphere radius)
+        const tubeGeo = new THREE.CylinderGeometry(tubeRadius, tubeRadius, 1, 8, 1)
+        tubeGeo.rotateX(Math.PI / 2)
         
-        linePositions.push(
-          Math.cos(angle1) * radius, y1, Math.sin(angle1) * radius,
-          Math.cos(angle2) * radius, y2, Math.sin(angle2) * radius
-        )
+        const tubeMat = materialController.getMaterial().clone()
+        tubeMat.transparent = false
+        tubeMat.opacity = 1
+        const tubeMesh = new THREE.InstancedMesh(tubeGeo, tubeMat, bondPairs.length)
+        tubeMesh.name = 'LATTICE_BONDS'
+        
+        const matrix = new THREE.Matrix4()
+        const position = new THREE.Vector3()
+        const quaternion = new THREE.Quaternion()
+        const scale = new THREE.Vector3()
+        const up = new THREE.Vector3(0, 0, 1)
+        
+        bondPairs.forEach((bond, i) => {
+          position.lerpVectors(bond.start, bond.end, 0.5)
+          
+          const direction = new THREE.Vector3().subVectors(bond.end, bond.start)
+          const length = direction.length()
+          direction.normalize()
+          
+          quaternion.setFromUnitVectors(up, direction)
+          scale.set(1, 1, length)
+          
+          matrix.compose(position, quaternion, scale)
+          tubeMesh.setMatrixAt(i, matrix)
+        })
+        tubeMesh.instanceMatrix.needsUpdate = true
+        group.add(tubeMesh)
       }
     }
     
-    if (linePositions.length > 0) {
-      const geometry = new THREE.BufferGeometry()
-      geometry.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3))
+    // Draw sculpture path as tubes (growing over slider duration)
+    if (sculpturePathRef.current.length >= 2) {
+      const pathCorners = sculpturePathRef.current
+      const pathSegments: { start: THREE.Vector3, end: THREE.Vector3 }[] = []
       
-      const material = new THREE.LineBasicMaterial({
-        color: 0xffffff,
-        transparent: true,
-        opacity: 0.7,
+      // Create segments connecting consecutive corners (closed loop)
+      for (let i = 0; i < pathCorners.length; i++) {
+        const next = (i + 1) % pathCorners.length
+        pathSegments.push({ start: pathCorners[i], end: pathCorners[next] })
+      }
+      
+      if (pathSegments.length > 0 && pathTubeFactor > 0.01) {
+        // Path tube radius = 2x final bond tube radius, growing with pathTubeFactor
+        const finalBondTubeRadius = maxSphereRadius * 0.16
+        const pathTubeRadius = finalBondTubeRadius * 2 * pathTubeFactor
+        
+        console.info(`[Structure] Path tubes: pathTubeFactor=${pathTubeFactor.toFixed(2)}, pathRadius=${pathTubeRadius.toFixed(4)}, segments=${pathSegments.length}`)
+        
+        const pathTubeGeo = new THREE.CylinderGeometry(pathTubeRadius, pathTubeRadius, 1, 8, 1)
+        pathTubeGeo.rotateX(Math.PI / 2)
+        
+        // Red material for debugging
+        const pathTubeMat = new THREE.MeshStandardMaterial({ 
+          color: 0xff0000, 
+          transparent: false, 
+          opacity: 1,
+          metalness: 0.3,
+          roughness: 0.7
+        })
+        const pathTubeMesh = new THREE.InstancedMesh(pathTubeGeo, pathTubeMat, pathSegments.length)
+        pathTubeMesh.name = 'SCULPTURE_PATH_TUBES'
+        
+        const matrix = new THREE.Matrix4()
+        const position = new THREE.Vector3()
+        const quaternion = new THREE.Quaternion()
+        const scale = new THREE.Vector3()
+        const up = new THREE.Vector3(0, 0, 1)
+        
+        pathSegments.forEach((seg, i) => {
+          position.lerpVectors(seg.start, seg.end, 0.5)
+          
+          const direction = new THREE.Vector3().subVectors(seg.end, seg.start)
+          const length = direction.length()
+          direction.normalize()
+          
+          quaternion.setFromUnitVectors(up, direction)
+          scale.set(1, 1, length)
+          
+          matrix.compose(position, quaternion, scale)
+          pathTubeMesh.setMatrixAt(i, matrix)
+        })
+        pathTubeMesh.instanceMatrix.needsUpdate = true
+        group.add(pathTubeMesh)
+        
+        // Add red corner spheres at each path corner
+        const cornerSphereRadius = pathTubeRadius * 2 // 2x tube diameter
+        const cornerSphereGeo = new THREE.SphereGeometry(cornerSphereRadius, 16, 12)
+        const cornerSphereMat = new THREE.MeshStandardMaterial({ 
+          color: 0xff0000, 
+          transparent: false, 
+          opacity: 1,
+          metalness: 0.3,
+          roughness: 0.7
+        })
+        const cornerSphereMesh = new THREE.InstancedMesh(cornerSphereGeo, cornerSphereMat, pathCorners.length)
+        cornerSphereMesh.name = 'PATH_CORNER_SPHERES'
+        
+        const dummy = new THREE.Object3D()
+        pathCorners.forEach((corner, i) => {
+          dummy.position.copy(corner)
+          dummy.scale.setScalar(1)
+          dummy.updateMatrix()
+          cornerSphereMesh.setMatrixAt(i, dummy.matrix)
+        })
+        cornerSphereMesh.instanceMatrix.needsUpdate = true
+        group.add(cornerSphereMesh)
+      }
+    }
+    
+    scene.add(group)
+    structureGroupRef.current = group
+  }, [structureValue, showStructure, showCurved, scene])
+
+  // Curved effect - dissolve lattice spheres and bonds
+  const curvedGroupRef = useRef<THREE.Group | null>(null)
+  
+  useEffect(() => {
+    // Cleanup previous curved group
+    if (curvedGroupRef.current) {
+      curvedGroupRef.current.traverse((obj) => {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.InstancedMesh) {
+          obj.geometry.dispose()
+          if (Array.isArray(obj.material)) {
+            obj.material.forEach(m => m.dispose())
+          } else {
+            obj.material.dispose()
+          }
+        }
+      })
+      scene.remove(curvedGroupRef.current)
+      curvedGroupRef.current = null
+    }
+    
+    if (!showCurved) return
+    
+    const group = new THREE.Group()
+    group.name = 'CURVED_GROUP'
+    
+    const latticeConstant = latticeConstantRef.current
+    const maxSphereRadius = latticeConstant * 0.12
+    const pathCorners = sculpturePathRef.current
+    
+    // Get the structure's final state data
+    const sculptureRadius = sculptureRadiusRef.current
+    const latticeRadius = sculptureRadius * 2
+    const allLatticePoints = latticePointsRef.current
+    const starPositions = galaxyStarPositionsRef.current
+    
+    // Calculate path center
+    const pathCenter = new THREE.Vector3()
+    if (pathCorners.length > 0) {
+      pathCorners.forEach(p => pathCenter.add(p))
+      pathCenter.divideScalar(pathCorners.length)
+    }
+    
+    const latticePoints = allLatticePoints.filter(p => p.distanceTo(pathCenter) < latticeRadius)
+    
+    if (latticePoints.length === 0 || starPositions.length === 0) return
+    
+    // Calculate dissolution progress (0 = full lattice, 50% = fully dissolved)
+    // Lattice dissolves over 0-50%, curving happens 50-100%
+    const dissolveProgress = Math.min(1, curvedValue / 50)
+    const sphereOpacity = Math.max(0, 1 - dissolveProgress)
+    const sphereScale = Math.max(0.01, 1 - dissolveProgress * 0.9) // Shrink as dissolving
+    
+    // Select stars closest to each lattice point (same as Structure)
+    const selectedStars: { star: THREE.Vector3, target: THREE.Vector3 }[] = []
+    const usedStarIndices = new Set<number>()
+    
+    for (const latticePoint of latticePoints) {
+      let closestIdx = -1
+      let closestDist = Infinity
+      for (let i = 0; i < starPositions.length; i++) {
+        if (usedStarIndices.has(i)) continue
+        const dist = starPositions[i].distanceTo(latticePoint)
+        if (dist < closestDist) {
+          closestDist = dist
+          closestIdx = i
+        }
+      }
+      if (closestIdx >= 0) {
+        usedStarIndices.add(closestIdx)
+        selectedStars.push({ star: starPositions[closestIdx].clone(), target: latticePoint.clone() })
+      }
+    }
+    
+    // Draw dissolving lattice spheres
+    if (selectedStars.length > 0 && sphereOpacity > 0.01) {
+      const sphereRadius = maxSphereRadius * sphereScale
+      const sphereGeo = new THREE.SphereGeometry(sphereRadius, 16, 12)
+      const sphereMat = materialController.getMaterial().clone()
+      sphereMat.transparent = true
+      sphereMat.opacity = sphereOpacity
+      const sphereMesh = new THREE.InstancedMesh(sphereGeo, sphereMat, selectedStars.length)
+      sphereMesh.name = 'DISSOLVING_SPHERES'
+      
+      const dummy = new THREE.Object3D()
+      selectedStars.forEach((s, i) => {
+        dummy.position.copy(s.target) // Use final lattice position
+        dummy.scale.setScalar(1)
+        dummy.updateMatrix()
+        sphereMesh.setMatrixAt(i, dummy.matrix)
+      })
+      sphereMesh.instanceMatrix.needsUpdate = true
+      group.add(sphereMesh)
+    }
+    
+    // Draw dissolving bonds
+    if (selectedStars.length > 1 && sphereOpacity > 0.01) {
+      const bondPairs: { start: THREE.Vector3, end: THREE.Vector3 }[] = []
+      const neighborDist = latticeConstant * 1.1
+      
+      for (let i = 0; i < selectedStars.length; i++) {
+        for (let j = i + 1; j < selectedStars.length; j++) {
+          const targetDist = selectedStars[i].target.distanceTo(selectedStars[j].target)
+          if (targetDist < neighborDist) {
+            bondPairs.push({ start: selectedStars[i].target, end: selectedStars[j].target })
+          }
+        }
+      }
+      
+      if (bondPairs.length > 0) {
+        const tubeRadius = maxSphereRadius * 0.16 * sphereScale
+        const tubeGeo = new THREE.CylinderGeometry(tubeRadius, tubeRadius, 1, 8, 1)
+        tubeGeo.rotateX(Math.PI / 2)
+        
+        const tubeMat = materialController.getMaterial().clone()
+        tubeMat.transparent = true
+        tubeMat.opacity = sphereOpacity
+        const tubeMesh = new THREE.InstancedMesh(tubeGeo, tubeMat, bondPairs.length)
+        tubeMesh.name = 'DISSOLVING_BONDS'
+        
+        const matrix = new THREE.Matrix4()
+        const position = new THREE.Vector3()
+        const quaternion = new THREE.Quaternion()
+        const scale = new THREE.Vector3()
+        const up = new THREE.Vector3(0, 0, 1)
+        
+        bondPairs.forEach((bond, i) => {
+          position.lerpVectors(bond.start, bond.end, 0.5)
+          const direction = new THREE.Vector3().subVectors(bond.end, bond.start)
+          const length = direction.length()
+          direction.normalize()
+          quaternion.setFromUnitVectors(up, direction)
+          scale.set(1, 1, length)
+          matrix.compose(position, quaternion, scale)
+          tubeMesh.setMatrixAt(i, matrix)
+        })
+        tubeMesh.instanceMatrix.needsUpdate = true
+        group.add(tubeMesh)
+      }
+    }
+    
+    // Sculpture path: smoothly deform from straight polyline to curved tube
+    if (pathCorners.length >= 2) {
+      const finalBondTubeRadius = maxSphereRadius * 0.16
+      const pathTubeRadius = finalBondTubeRadius * 2
+      
+      // Calculate curve interpolation factor (0 = straight, 1 = fully curved)
+      // This happens after lattice dissolves (50-100% of slider)
+      const curveProgress = Math.max(0, Math.min(1, (curvedValue - 50) / 50))
+      
+      const pathTubeMat = new THREE.MeshStandardMaterial({ 
+        color: 0xff0000, 
+        transparent: false, 
+        opacity: 1,
+        metalness: 0.3,
+        roughness: 0.7
       })
       
-      const lines = new THREE.LineSegments(geometry, material)
-      lines.name = 'PATHS_LINES'
-      scene.add(lines)
-      pathsLinesRef.current = lines
+      // Use sculptureCurve from OBJ file as morph target
+      const sculptureCurve = sculptureCurveRef.current
+      
+      // Number of samples for the tube
+      const totalSamples = pathCorners.length * 16
+      const interpolatedPoints: THREE.Vector3[] = []
+      
+      if (sculptureCurve.length >= 2 && curveProgress > 0) {
+        // Create curve from the actual sculpture curve points (closed loop)
+        const targetCurve = new THREE.CatmullRomCurve3(sculptureCurve, true, 'catmullrom', 0.5)
+        
+        // Find the t value on the curve closest to the first polyline corner
+        const firstCorner = pathCorners[0]
+        let bestT = 0
+        let bestDist = Infinity
+        for (let i = 0; i <= 100; i++) {
+          const t = i / 100
+          const pt = targetCurve.getPoint(t)
+          const dist = pt.distanceTo(firstCorner)
+          if (dist < bestDist) {
+            bestDist = dist
+            bestT = t
+          }
+        }
+        
+        // Check direction: compare second corner to curve direction
+        const secondCorner = pathCorners[1]
+        const curveAtStart = targetCurve.getPoint(bestT)
+        const curveSlightlyAhead = targetCurve.getPoint((bestT + 0.05) % 1)
+        const curveSlightlyBehind = targetCurve.getPoint((bestT + 0.95) % 1)
+        
+        const distAhead = curveSlightlyAhead.distanceTo(secondCorner)
+        const distBehind = curveSlightlyBehind.distanceTo(secondCorner)
+        const reverseDirection = distBehind < distAhead
+        
+        // Sample points along both straight polyline and target curve, then interpolate
+        for (let i = 0; i < totalSamples; i++) {
+          const t = i / totalSamples // 0 to 1 around the path
+          
+          // Get point on target sculpture curve (offset by bestT and possibly reversed)
+          let curveT = reverseDirection ? (bestT - t + 1) % 1 : (bestT + t) % 1
+          const curvedPoint = targetCurve.getPoint(curveT)
+          
+          // Get point on straight polyline (exact polyline geometry)
+          const segmentFloat = t * pathCorners.length
+          const segmentIndex = Math.floor(segmentFloat) % pathCorners.length
+          const segmentT = segmentFloat - Math.floor(segmentFloat)
+          const nextIndex = (segmentIndex + 1) % pathCorners.length
+          const straightPoint = new THREE.Vector3().lerpVectors(
+            pathCorners[segmentIndex], 
+            pathCorners[nextIndex], 
+            segmentT
+          )
+          
+          // Interpolate between straight polyline and sculpture curve based on progress
+          const interpolatedPoint = new THREE.Vector3().lerpVectors(
+            straightPoint, 
+            curvedPoint, 
+            curveProgress
+          )
+          interpolatedPoints.push(interpolatedPoint)
+        }
+      } else {
+        // curveProgress=0: show exact straight polyline
+        for (let i = 0; i < totalSamples; i++) {
+          const t = i / totalSamples
+          const segmentFloat = t * pathCorners.length
+          const segmentIndex = Math.floor(segmentFloat) % pathCorners.length
+          const segmentT = segmentFloat - Math.floor(segmentFloat)
+          const nextIndex = (segmentIndex + 1) % pathCorners.length
+          const straightPoint = new THREE.Vector3().lerpVectors(
+            pathCorners[segmentIndex], 
+            pathCorners[nextIndex], 
+            segmentT
+          )
+          interpolatedPoints.push(straightPoint)
+        }
+      }
+      
+      // Create tube through the points (use tension=0 for polyline look when straight)
+      if (interpolatedPoints.length >= 2) {
+        const tension = curveProgress * 0.5 // 0 tension at start (angular), 0.5 at end (smooth)
+        const interpCurve = new THREE.CatmullRomCurve3(interpolatedPoints, true, 'catmullrom', tension)
+        const tubeGeo = new THREE.TubeGeometry(interpCurve, totalSamples, pathTubeRadius, 8, true)
+        const tubeMesh = new THREE.Mesh(tubeGeo, pathTubeMat)
+        tubeMesh.name = 'SCULPTURE_PATH_MORPHING'
+        group.add(tubeMesh)
+      }
+      
+      // Corner spheres shrink as curve forms (they become unnecessary)
+      if (curveProgress < 1) {
+        const cornerSphereRadius = pathTubeRadius * 2 * (1 - curveProgress)
+        if (cornerSphereRadius > 0.001) {
+          const cornerSphereGeo = new THREE.SphereGeometry(cornerSphereRadius, 16, 12)
+          const cornerSphereMesh = new THREE.InstancedMesh(cornerSphereGeo, pathTubeMat, pathCorners.length)
+          cornerSphereMesh.name = 'PATH_CORNER_SPHERES'
+          
+          const dummy = new THREE.Object3D()
+          pathCorners.forEach((corner, i) => {
+            dummy.position.copy(corner)
+            dummy.scale.setScalar(1)
+            dummy.updateMatrix()
+            cornerSphereMesh.setMatrixAt(i, dummy.matrix)
+          })
+          cornerSphereMesh.instanceMatrix.needsUpdate = true
+          group.add(cornerSphereMesh)
+        }
+      }
     }
-  }, [pathsValue, showPaths, scene, galaxyStars])
+    
+    scene.add(group)
+    curvedGroupRef.current = group
+  }, [curvedValue, showCurved, scene])
 
   // Track cleanup frames after AR exit
   const arCleanupFramesRef = useRef(0)
@@ -1402,6 +2035,86 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   
   useFrame((_, delta) => {
     if (controlsRef.current) controlsRef.current.update()
+    
+    // Animate shooting stars
+    if (showPaths && pathsValue <= 20 && shootingStarsRef.current.length > 0) {
+      shootingStarsRef.current.forEach(shooter => {
+        shooter.progress += delta * shooter.speed
+        if (shooter.progress > 1) {
+          shooter.progress = 0
+          // Respawn at new random position
+          const stars = galaxyStarPositionsRef.current
+          const sphereRadius = sculptureRadiusRef.current * 3
+          const startIdx = Math.floor(Math.random() * Math.max(1, stars.length))
+          shooter.start = stars.length > 0 ? stars[startIdx].clone() : new THREE.Vector3(
+            (Math.random() - 0.5) * sphereRadius * 2,
+            (Math.random() - 0.5) * sphereRadius * 2,
+            (Math.random() - 0.5) * sphereRadius * 2
+          )
+          const direction = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize()
+          shooter.end = shooter.start.clone().add(direction.multiplyScalar(sphereRadius * 0.5))
+          shooter.speed = 0.3 + Math.random() * 0.5
+        }
+        
+        // Update line geometry - draw trail from current position back
+        const headPos = new THREE.Vector3().lerpVectors(shooter.start, shooter.end, shooter.progress)
+        const tailProgress = Math.max(0, shooter.progress - 0.15)
+        const tailPos = new THREE.Vector3().lerpVectors(shooter.start, shooter.end, tailProgress)
+        
+        const positions = shooter.line.geometry.attributes.position
+        positions.setXYZ(0, tailPos.x, tailPos.y, tailPos.z)
+        positions.setXYZ(1, headPos.x, headPos.y, headPos.z)
+        positions.needsUpdate = true
+        
+        // Fade based on progress
+        const material = shooter.line.material as THREE.LineBasicMaterial
+        material.opacity = shooter.progress < 0.1 ? shooter.progress * 8 : (1 - shooter.progress) * 1.2
+      })
+    }
+    
+    // Animate shapes and constellations (phases 3a and 3b)
+    if (showPaths && pathsValue > 40 && pathsValue <= 70 && animatedShapesRef.current.length > 0) {
+      animatedShapesRef.current.forEach(shape => {
+        shape.progress += delta * shape.speed
+        
+        // Calculate how many segments to show based on progress
+        const totalSegments = shape.points.length - 1
+        const segmentsToShow = Math.floor(shape.progress * totalSegments)
+        const withinSegment = (shape.progress * totalSegments) - segmentsToShow
+        
+        if (segmentsToShow >= totalSegments) {
+          // Shape complete, restart after brief pause
+          if (shape.progress > totalSegments / shape.speed + 0.5) {
+            shape.progress = 0
+          }
+          // Show complete shape
+          shape.line.geometry.dispose()
+          shape.line.geometry = new THREE.BufferGeometry().setFromPoints(shape.points)
+        } else if (segmentsToShow >= 0) {
+          // Animate current segment
+          const drawPoints: THREE.Vector3[] = []
+          for (let i = 0; i <= segmentsToShow; i++) {
+            drawPoints.push(shape.points[i])
+          }
+          // Add animated head position
+          if (segmentsToShow < totalSegments) {
+            const headPos = new THREE.Vector3().lerpVectors(
+              shape.points[segmentsToShow],
+              shape.points[segmentsToShow + 1],
+              withinSegment
+            )
+            drawPoints.push(headPos)
+          }
+          
+          shape.line.geometry.dispose()
+          shape.line.geometry = new THREE.BufferGeometry().setFromPoints(drawPoints)
+        }
+        
+        // Fade effect
+        const material = shape.line.material as THREE.LineBasicMaterial
+        material.opacity = shape.progress < 0.1 ? shape.progress * 8 : 0.8
+      })
+    }
     
     // Continuous AR cleanup for several frames after AR exit
     if (arCleanupFramesRef.current > 0) {
@@ -1674,7 +2387,6 @@ function LoadingIndicator() {
 
 export function AppLanding() {
   const [settingsModalOpen, setSettingsModalOpen] = useState(false)
-  const [debugPanelOpen, setDebugPanelOpen] = useState(false)
   const [menuOpen, setMenuOpen] = useState(false)
   const [materialExpanded, setMaterialExpanded] = useState(false)
   const [designExpanded, setDesignExpanded] = useState(false)
@@ -1688,6 +2400,10 @@ export function AppLanding() {
   const [pathsValue, setPathsValue] = useState(0)
   const [pathsInfoOpen, setPathsInfoOpen] = useState(false)
   const [pathsInfoPos, setPathsInfoPos] = useState({ x: 100, y: 150 })
+  const [designStructureModalOpen, setDesignStructureModalOpen] = useState(false)
+  const [structureValue, setStructureValue] = useState(0)
+  const [designCurvedModalOpen, setDesignCurvedModalOpen] = useState(false)
+  const [curvedValue, setCurvedValue] = useState(0)
 
   useEffect(() => {
     if (!menuOpen) {
@@ -1710,22 +2426,22 @@ export function AppLanding() {
   const cameraAnimStateRef = useRef<{ filteredViewpoints: CameraViewpoint[], currentIndex: number, timePerViewpoint: number } | null>(null)
   const [smoothCameraAnim, setSmoothCameraAnim] = useState<SmoothCameraAnimation | null>(null)
   const [autoRotate, setAutoRotate] = useState(false)
-  const [rotateSpeed, setRotateSpeed] = useState(0.5)
+  const [rotateSpeed] = useState(0.5)
   const [mode, setMode] = useState<AppMode>(modeController.getMode())
   const [_sculptureLoaded, setSculptureLoaded] = useState(false)
-  const [loftProgress, setLoftProgress] = useState(0)
-  const [straighten, setStraighten] = useState(0)
-  const [sphereRadius, setSphereRadius] = useState(0)
-  const [starDensity, setStarDensity] = useState(0)
-  const [cosmicScale, setCosmicScale] = useState(0)
-  const [bondDensity, setBondDensity] = useState(0)
-  const [starScale, setStarScale] = useState(0.1)
-  const [galaxySize, setGalaxySize] = useState(4)
+  const [loftProgress] = useState(0)
+  const [straighten] = useState(0)
+  const [sphereRadius] = useState(0)
+  const [starDensity] = useState(0)
+  const [cosmicScale] = useState(0)
+  const [bondDensity] = useState(0)
+  const [starScale] = useState(0.1)
+  const [galaxySize] = useState(4)
   const [cameraViewpoint, setCameraViewpoint] = useState(-1)
   const [cameraViewpoints, setCameraViewpoints] = useState<CameraViewpoint[]>([])
-  const [lensLength, setLensLength] = useState(100) // mm equivalent
+  const [lensLength] = useState(100) // mm equivalent
   const [webgpuSupported, setWebgpuSupported] = useState<boolean | null>(null)
-  const [rendererInfo, setRendererInfo] = useState<{ vendor: string; renderer: string; webglVersion: string } | null>(null)
+  const [, setRendererInfo] = useState<{ vendor: string; renderer: string; webglVersion: string } | null>(null)
   const [debugMode] = useState(true)
   
   // AR state
@@ -1916,265 +2632,13 @@ export function AppLanding() {
         }}
       >
         {debugMode ? (
-          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} smoothCameraAnim={smoothCameraAnim} onSmoothAnimComplete={handleSmoothAnimComplete} showHull={showHull} arController={arControllerRef.current} sceneResetTrigger={sceneResetTrigger} galaxyStars={galaxyStarsValue} showPoints={designPointsModalOpen} pathsValue={pathsValue} showPaths={designPathsModalOpen} />
+          <DebugLoftScene loftProgress={loftProgress} straighten={straighten} onLoaded={handleSculptureLoaded} autoRotate={autoRotate} rotateSpeed={rotateSpeed} sphereRadius={sphereRadius} starDensity={starDensity} cosmicScale={cosmicScale} bondDensity={bondDensity} starScale={starScale} galaxySize={galaxySize} cameraViewpoint={cameraViewpoint} cameraFov={cameraFov} useGpu={webgpuSupported === true} onCameraViewpointsComputed={setCameraViewpoints} smoothCameraAnim={smoothCameraAnim} onSmoothAnimComplete={handleSmoothAnimComplete} showHull={showHull} arController={arControllerRef.current} sceneResetTrigger={sceneResetTrigger} galaxyStars={galaxyStarsValue} showPoints={designPointsModalOpen} pathsValue={pathsValue} showPaths={designPathsModalOpen} structureValue={structureValue} showStructure={designStructureModalOpen} curvedValue={curvedValue} showCurved={designCurvedModalOpen} />
         ) : (
           <SculptureScene onSculptureLoaded={handleSculptureLoaded} />
         )}
       </Canvas>
 
-      {debugMode && debugPanelOpen && (
-        <div style={styles.debugPanel}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: '8px' }}>
-            <h3 style={{ margin: 0, color: '#fff', fontSize: '11px' }}>Debug Controls</h3>
-            <button 
-              onClick={() => setDebugPanelOpen(false)} 
-              style={{ background: 'none', border: 'none', color: '#888', cursor: 'pointer', fontSize: '14px', padding: '0 4px' }}
-            >✕</button>
-          </div>
-          
-          {rendererInfo && (
-            <div style={{ marginBottom: '6px', padding: '6px', background: '#1a1a1a', borderRadius: '4px', fontSize: '11px' }}>
-              <div style={{ color: '#4a9eff', marginBottom: '2px' }}>
-                {rendererInfo.webglVersion} {webgpuSupported ? '• WebGPU Ready' : ''}
-              </div>
-              <div style={{ color: '#888', fontSize: '12px', wordBreak: 'break-word' }}>
-                {rendererInfo.renderer}
-              </div>
-            </div>
-          )}
-          
-          <div style={{ marginBottom: '6px' }}>
-            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Scale to Heartline</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Full</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={loftProgress}
-                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] loftProgress = ${v}`); setLoftProgress(v); }}
-                style={{ flex: 1 }}
-              />
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Core</span>
-            </div>
-            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
-              Scale: <strong>{((1.0 - loftProgress * 0.975) * 100).toFixed(1)}%</strong>
-            </div>
-          </div>
-          
-          <div style={{ marginBottom: '6px' }}>
-            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Straighten to Polyline</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Curve</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={straighten}
-                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] straighten = ${v}`); setStraighten(v); }}
-                style={{ flex: 1 }}
-              />
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Stick</span>
-            </div>
-            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
-              Straighten: <strong>{(straighten * 100).toFixed(0)}%</strong>
-            </div>
-          </div>
-          
-          <div style={{ marginBottom: '6px' }}>
-            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Corner Spheres</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Off</span>
-              <input
-                type="range"
-                min={0}
-                max={0.5}
-                step={0.01}
-                value={sphereRadius}
-                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] sphereRadius = ${v}`); setSphereRadius(v); }}
-                style={{ flex: 1 }}
-              />
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Large</span>
-            </div>
-            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
-              Radius: <strong>{sphereRadius > 0 ? sphereRadius.toFixed(2) : 'Off'}</strong>
-            </div>
-          </div>
-          
-          <div style={{ marginBottom: '6px' }}>
-            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Galaxy Stars</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>None</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={starDensity}
-                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] starDensity = ${v}`); setStarDensity(v); }}
-                style={{ flex: 1 }}
-              />
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Max</span>
-            </div>
-            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
-              Density: <strong>{(starDensity * 100).toFixed(0)}%</strong>
-            </div>
-          </div>
-          
-          <div style={{ marginBottom: '6px' }}>
-            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Galaxy Size</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>1x</span>
-              <input
-                type="range"
-                min={1}
-                max={10}
-                step={0.5}
-                value={galaxySize}
-                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] galaxySize = ${v}`); setGalaxySize(v); }}
-                style={{ flex: 1 }}
-              />
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>10x</span>
-            </div>
-            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
-              Size: <strong>{galaxySize.toFixed(1)}x</strong> radius
-            </div>
-          </div>
-          
-          <div style={{ marginBottom: '6px' }}>
-            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Star Scaler</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Tiny</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={starScale}
-                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] starScale = ${v}`); setStarScale(v); }}
-                style={{ flex: 1 }}
-              />
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Touch</span>
-            </div>
-            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
-              Scale: <strong>{(starScale * 100).toFixed(0)}%</strong>
-            </div>
-          </div>
-          
-          <div style={{ marginBottom: '6px' }}>
-            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Cosmic Scaler</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Cosmic</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={cosmicScale}
-                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] cosmicScale = ${v}`); setCosmicScale(v); }}
-                style={{ flex: 1 }}
-              />
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Atomic</span>
-            </div>
-            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
-              Lattice: <strong>{(cosmicScale * 100).toFixed(0)}%</strong>
-            </div>
-          </div>
-          
-          <div style={{ marginBottom: '6px' }}>
-            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Atom Bonds</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>None</span>
-              <input
-                type="range"
-                min={0}
-                max={1}
-                step={0.01}
-                value={bondDensity}
-                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] bondDensity = ${v}`); setBondDensity(v); }}
-                style={{ flex: 1 }}
-              />
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Full</span>
-            </div>
-            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
-              Bonds: <strong>{bondDensity > 0 ? `${(bondDensity * 100).toFixed(0)}%` : 'Off'}</strong>
-            </div>
-          </div>
-          
-          <div style={{ marginBottom: '6px' }}>
-            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Rotation Speed</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Slow</span>
-              <input
-                type="range"
-                min={0}
-                max={1.25}
-                step={0.005}
-                value={rotateSpeed}
-                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] rotateSpeed = ${v}`); setRotateSpeed(v); }}
-                style={{ flex: 1 }}
-              />
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>Fast</span>
-            </div>
-            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
-              Speed: <strong>{rotateSpeed.toFixed(3)}</strong>
-            </div>
-          </div>
-          
-          {cameraViewpoints.length > 0 && (
-            <div style={{ marginBottom: '6px' }}>
-              <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Camera Viewpoint</div>
-              <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-                <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>Free</span>
-                <input
-                  type="range"
-                  min={-1}
-                  max={cameraViewpoints.length - 1}
-                  step={1}
-                  value={cameraViewpoint}
-                  onChange={(e) => { const v = parseInt(e.target.value); console.log(`[Tools] cameraViewpoint = ${v}`); setCameraViewpoint(v); }}
-                  style={{ flex: 1 }}
-                />
-                <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>{cameraViewpoints.length}</span>
-              </div>
-              <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
-                {cameraViewpoint < 0 ? (
-                  <span>Mode: <strong>Free Camera</strong></span>
-                ) : (
-                  <span>
-                    <strong>{cameraViewpoints[cameraViewpoint]?.label}</strong>
-                    <span style={{ color: '#888', marginLeft: '6px', fontSize: '11px' }}>({cameraViewpoints[cameraViewpoint]?.type})</span>
-                  </span>
-                )}
-              </div>
-            </div>
-          )}
-          
-          <div>
-            <div style={{ color: '#aaa', fontSize: '11px', marginBottom: '4px' }}>Camera Lens</div>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '4px' }}>
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px' }}>20mm</span>
-              <input
-                type="range"
-                min={20}
-                max={300}
-                step={5}
-                value={lensLength}
-                onChange={(e) => { const v = parseFloat(e.target.value); console.log(`[Tools] lensLength = ${v}`); setLensLength(v); }}
-                style={{ flex: 1 }}
-              />
-              <span style={{ color: '#888', fontSize: '11px', minWidth: '28px', textAlign: 'right' }}>300mm</span>
-            </div>
-            <div style={{ marginTop: '2px', color: '#fff', fontSize: '11px' }}>
-              Lens: <strong>{lensLength}mm</strong>
-              <span style={{ color: '#888', marginLeft: '6px', fontSize: '11px' }}>(FOV {cameraFov.toFixed(1)}°)</span>
-            </div>
-          </div>
-        </div>
-      )}
-
+      
       {/* 3-dot menu top right */}
       <div style={styles.menuContainer}>
         <button
@@ -2217,12 +2681,10 @@ export function AppLanding() {
               {designExpanded && (
                 <div style={{ paddingLeft: '12px', background: 'rgba(0,0,0,0.3)' }}>
                   <button style={styles.dropdownItem} onClick={() => { setDesignPointsModalOpen(true); setMenuOpen(false); }}>Points</button>
-                  <button style={styles.dropdownItem} onClick={() => { setDesignPathsModalOpen(true); setMenuOpen(false); }}>Paths</button>
-                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Structure</button>
-                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Curved</button>
+                  <button style={styles.dropdownItem} onClick={() => { setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setMenuOpen(false); }}>Paths</button>
+                  <button style={styles.dropdownItem} onClick={() => { setDesignStructureModalOpen(true); setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setPathsValue(100); setMenuOpen(false); }}>Structure</button>
+                  <button style={styles.dropdownItem} onClick={() => { setDesignCurvedModalOpen(true); setDesignStructureModalOpen(true); setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setPathsValue(100); setStructureValue(100); setMenuOpen(false); }}>Curved</button>
                   <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Profiled</button>
-                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Symmetry</button>
-                  <button style={styles.dropdownItem} onClick={() => { setMenuOpen(false); }}>Perspectives</button>
                 </div>
               )}
             </div>
@@ -2257,20 +2719,12 @@ export function AppLanding() {
             >
               Settings
             </button>
-            {debugMode && (
-              <button
-                style={{ ...styles.dropdownItem, color: '#888' }}
-                onClick={() => { setDebugPanelOpen(!debugPanelOpen); setMenuOpen(false); }}
-              >
-                Tools
-              </button>
-            )}
-          </div>
+                      </div>
         )}
       </div>
 
-      {/* Galaxy Stars slider - shows when Points is selected */}
-      {designPointsModalOpen && (
+      {/* Galaxy Stars slider - shows when Points is selected but NOT Paths */}
+      {designPointsModalOpen && !designPathsModalOpen && (
         <div style={styles.galaxySliderContainer}>
           <input
             type="range"
@@ -2290,8 +2744,8 @@ export function AppLanding() {
         </div>
       )}
 
-      {/* Paths slider - shows when Paths is selected */}
-      {designPathsModalOpen && (
+      {/* Paths slider - shows when Paths is selected but NOT Structure */}
+      {designPathsModalOpen && !designStructureModalOpen && (
         <div style={styles.galaxySliderContainer}>
           <input
             type="range"
@@ -2304,6 +2758,48 @@ export function AppLanding() {
           <button
             style={styles.infoButton}
             onClick={() => setPathsInfoOpen(true)}
+            title="Info"
+          >
+            i
+          </button>
+        </div>
+      )}
+
+      {/* Structure slider - shows when Structure is selected but NOT Curved */}
+      {designStructureModalOpen && !designCurvedModalOpen && (
+        <div style={styles.galaxySliderContainer}>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={structureValue}
+            onChange={(e) => setStructureValue(Number(e.target.value))}
+            style={styles.galaxySlider}
+          />
+          <button
+            style={styles.infoButton}
+            onClick={() => {}}
+            title="Info"
+          >
+            i
+          </button>
+        </div>
+      )}
+
+      {/* Curved slider - shows when Curved is selected */}
+      {designCurvedModalOpen && (
+        <div style={styles.galaxySliderContainer}>
+          <input
+            type="range"
+            min="0"
+            max="100"
+            value={curvedValue}
+            onChange={(e) => setCurvedValue(Number(e.target.value))}
+            style={styles.galaxySlider}
+          />
+          <button
+            style={styles.infoButton}
+            onClick={() => {}}
             title="Info"
           >
             i
@@ -2595,17 +3091,6 @@ const styles: Record<string, React.CSSProperties> = {
     fontSize: '14px',
     cursor: 'pointer',
   },
-  debugPanel: {
-    position: 'absolute',
-    top: '10px',
-    left: '10px',
-    background: 'rgba(0,0,0,0.85)',
-    padding: '8px 12px',
-    borderRadius: '6px',
-    width: '220px',
-    fontFamily: 'sans-serif',
-    fontSize: '12px',
-  },
-}
+  }
 
 export default AppLanding
