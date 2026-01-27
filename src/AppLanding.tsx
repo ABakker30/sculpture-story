@@ -1118,6 +1118,33 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   const galaxyStarsRef = useRef<THREE.Points | null>(null)
   const sculptureRadiusRef = useRef<number>(30) // Default, will be computed from mesh
   
+  // Two-sphere collision animation refs
+  const collisionSphere1Ref = useRef<THREE.Mesh | null>(null)
+  const collisionSphere2Ref = useRef<THREE.Mesh | null>(null)
+  const explosionFlashRef = useRef<THREE.Mesh | null>(null)
+  const explosionParticlesRef = useRef<THREE.Points | null>(null)
+  const collisionAnimStateRef = useRef<{
+    phase: 'idle' | 'spheres' | 'approach' | 'collision' | 'explosion' | 'galaxy'
+    sphere1Pos: THREE.Vector3
+    sphere2Pos: THREE.Vector3
+    sphere1Scale: number
+    sphere2Scale: number
+    explosionProgress: number
+    particlePositions: Float32Array | null
+    particleVelocities: Float32Array | null
+    particleTargets: Float32Array | null
+  }>({
+    phase: 'idle',
+    sphere1Pos: new THREE.Vector3(-15, 8, 5),
+    sphere2Pos: new THREE.Vector3(15, -6, -5),
+    sphere1Scale: 0,
+    sphere2Scale: 0,
+    explosionProgress: 0,
+    particlePositions: null,
+    particleVelocities: null,
+    particleTargets: null
+  })
+  
   // Compute and store sculpture radius when mesh changes
   useEffect(() => {
     if (meshRef.current) {
@@ -1194,22 +1221,15 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     const positions = new Float32Array(maxStars * 3)
     const colors = new Float32Array(maxStars * 3)
     
-    // First point at center
-    positions[0] = 0
-    positions[1] = 0
-    positions[2] = 0
-    
     for (let i = 0; i < maxStars; i++) {
-      if (i > 0) {
-        // Seeded spherical distribution
-        const r = sphereRadius * Math.cbrt(seededRandom())
-        const theta = seededRandom() * Math.PI * 2
-        const phi = Math.acos(2 * seededRandom() - 1)
-        
-        positions[i * 3] = r * Math.sin(phi) * Math.cos(theta)
-        positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta)
-        positions[i * 3 + 2] = r * Math.cos(phi)
-      }
+      // Seeded spherical distribution
+      const r = sphereRadius * Math.cbrt(seededRandom())
+      const theta = seededRandom() * Math.PI * 2
+      const phi = Math.acos(2 * seededRandom() - 1)
+      
+      positions[i * 3] = r * Math.sin(phi) * Math.cos(theta)
+      positions[i * 3 + 1] = r * Math.sin(phi) * Math.sin(theta)
+      positions[i * 3 + 2] = r * Math.cos(phi)
       
       // Warm white colors (seeded)
       const colorVariation = seededRandom()
@@ -1221,67 +1241,264 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     starPoolRef.current = { positions, colors }
   }, [])
   
-  // Create stars based on slider value (stars appear after black pause at 25%)
+  // Two-sphere collision animation effect
+  // Phases: 0-20 = sculpture fade, 20-40 = spheres emerge, 40-70 = approach & collide, 70-100 = explosion to galaxy
   useEffect(() => {
-    // Remove existing galaxy stars
-    if (galaxyStarsRef.current) {
-      scene.remove(galaxyStarsRef.current)
-      galaxyStarsRef.current.geometry.dispose()
-      ;(galaxyStarsRef.current.material as THREE.PointsMaterial).dispose()
-      galaxyStarsRef.current = null
+    const state = collisionAnimStateRef.current
+    const sphereRadius = sculptureRadiusRef.current
+    
+    // Cleanup function for all collision objects
+    const cleanup = () => {
+      if (collisionSphere1Ref.current) {
+        scene.remove(collisionSphere1Ref.current)
+        collisionSphere1Ref.current.geometry.dispose()
+        ;(collisionSphere1Ref.current.material as THREE.Material).dispose()
+        collisionSphere1Ref.current = null
+      }
+      if (collisionSphere2Ref.current) {
+        scene.remove(collisionSphere2Ref.current)
+        collisionSphere2Ref.current.geometry.dispose()
+        ;(collisionSphere2Ref.current.material as THREE.Material).dispose()
+        collisionSphere2Ref.current = null
+      }
+      if (explosionFlashRef.current) {
+        scene.remove(explosionFlashRef.current)
+        explosionFlashRef.current.geometry.dispose()
+        ;(explosionFlashRef.current.material as THREE.Material).dispose()
+        explosionFlashRef.current = null
+      }
+      if (explosionParticlesRef.current) {
+        scene.remove(explosionParticlesRef.current)
+        explosionParticlesRef.current.geometry.dispose()
+        ;(explosionParticlesRef.current.material as THREE.Material).dispose()
+        explosionParticlesRef.current = null
+      }
+      if (galaxyStarsRef.current) {
+        scene.remove(galaxyStarsRef.current)
+        galaxyStarsRef.current.geometry.dispose()
+        ;(galaxyStarsRef.current.material as THREE.PointsMaterial).dispose()
+        galaxyStarsRef.current = null
+      }
     }
     
-    // Only show stars when in Points mode AND after black pause (slider > 25)
-    if (!showPoints || galaxyStars <= 25 || !starPoolRef.current) return
-    
-    // Calculate star count with ease-in: remap slider 25-100 to star count 1-5000
-    const adjustedSlider = galaxyStars - 25 // 0-75 range
-    const t = adjustedSlider / 75 // Normalize to 0-1
-    const easeIn = t * t * t // Cubic ease-in: slow start, accelerates
-    
-    let starCount: number
-    if (adjustedSlider <= 1) {
-      starCount = 1 // Single center point
-    } else {
-      starCount = Math.max(1, Math.floor(easeIn * maxStars))
+    if (!showPoints || galaxyStars <= 20) {
+      cleanup()
+      state.phase = 'idle'
+      return
     }
     
-    // Use subset of pre-computed positions
-    const positions = starPoolRef.current.positions.slice(0, starCount * 3)
-    const colors = starPoolRef.current.colors.slice(0, starCount * 3)
+    // Phase 1: Spheres emerge and grow (20-40)
+    if (galaxyStars > 20 && galaxyStars <= 40) {
+      // Remove explosion/galaxy objects if going back
+      if (explosionParticlesRef.current) {
+        scene.remove(explosionParticlesRef.current)
+        explosionParticlesRef.current.geometry.dispose()
+        ;(explosionParticlesRef.current.material as THREE.Material).dispose()
+        explosionParticlesRef.current = null
+      }
+      if (galaxyStarsRef.current) {
+        scene.remove(galaxyStarsRef.current)
+        galaxyStarsRef.current.geometry.dispose()
+        ;(galaxyStarsRef.current.material as THREE.PointsMaterial).dispose()
+        galaxyStarsRef.current = null
+      }
+      
+      const progress = (galaxyStars - 20) / 20 // 0 to 1
+      const maxSphereSize = sphereRadius * 0.3
+      const currentSize = maxSphereSize * progress
+      
+      // Create or update sphere 1 (high resolution, sculpture material)
+      if (!collisionSphere1Ref.current) {
+        const geo = new THREE.SphereGeometry(1, 64, 48)
+        const mat = materialController.getMaterial().clone()
+        const mesh = new THREE.Mesh(geo, mat)
+        mesh.name = 'COLLISION_SPHERE_1'
+        scene.add(mesh)
+        collisionSphere1Ref.current = mesh
+      }
+      
+      // Create or update sphere 2 (high resolution, sculpture material)
+      if (!collisionSphere2Ref.current) {
+        const geo = new THREE.SphereGeometry(1, 64, 48)
+        const mat = materialController.getMaterial().clone()
+        const mesh = new THREE.Mesh(geo, mat)
+        mesh.name = 'COLLISION_SPHERE_2'
+        scene.add(mesh)
+        collisionSphere2Ref.current = mesh
+      }
+      
+      // Position spheres at opposite corners
+      const startDist = sphereRadius * 2
+      state.sphere1Pos.set(-startDist, startDist * 0.5, startDist * 0.3)
+      state.sphere2Pos.set(startDist, -startDist * 0.4, -startDist * 0.3)
+      
+      collisionSphere1Ref.current.position.copy(state.sphere1Pos)
+      collisionSphere1Ref.current.scale.setScalar(currentSize)
+      collisionSphere2Ref.current.position.copy(state.sphere2Pos)
+      collisionSphere2Ref.current.scale.setScalar(currentSize)
+      
+      state.sphere1Scale = currentSize
+      state.sphere2Scale = currentSize
+      state.phase = 'spheres'
+    }
     
-    const geometry = new THREE.BufferGeometry()
-    geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
-    geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+    // Phase 2: Spheres approach and collide (40-70)
+    else if (galaxyStars > 40 && galaxyStars <= 70) {
+      const progress = (galaxyStars - 40) / 30 // 0 to 1
+      // Ease-in-out for approach, then accelerate at end
+      const easeProgress = progress < 0.7 
+        ? progress / 0.7 * 0.5 // Slow approach (0-0.5)
+        : 0.5 + ((progress - 0.7) / 0.3) * 0.5 // Fast final approach (0.5-1)
+      
+      const startDist = sphereRadius * 2
+      const start1 = new THREE.Vector3(-startDist, startDist * 0.5, startDist * 0.3)
+      const start2 = new THREE.Vector3(startDist, -startDist * 0.4, -startDist * 0.3)
+      const center = new THREE.Vector3(0, 0, 0)
+      
+      // Interpolate positions toward center
+      state.sphere1Pos.lerpVectors(start1, center, easeProgress)
+      state.sphere2Pos.lerpVectors(start2, center, easeProgress)
+      
+      if (collisionSphere1Ref.current) {
+        collisionSphere1Ref.current.position.copy(state.sphere1Pos)
+      }
+      if (collisionSphere2Ref.current) {
+        collisionSphere2Ref.current.position.copy(state.sphere2Pos)
+      }
+      
+      state.phase = 'approach'
+    }
     
-    // Create circular texture for round points
-    const canvas = document.createElement('canvas')
-    canvas.width = 64
-    canvas.height = 64
-    const ctx = canvas.getContext('2d')!
-    const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32)
-    gradient.addColorStop(0, 'rgba(255,255,255,1)')
-    gradient.addColorStop(0.5, 'rgba(255,255,255,0.8)')
-    gradient.addColorStop(1, 'rgba(255,255,255,0)')
-    ctx.fillStyle = gradient
-    ctx.fillRect(0, 0, 64, 64)
-    const circleTexture = new THREE.CanvasTexture(canvas)
+    // Phase 3: Collision flash and explosion (70-75)
+    else if (galaxyStars > 70 && galaxyStars <= 75) {
+      const flashProgress = (galaxyStars - 70) / 5 // 0 to 1
+      
+      // Remove spheres
+      if (collisionSphere1Ref.current) {
+        scene.remove(collisionSphere1Ref.current)
+        collisionSphere1Ref.current.geometry.dispose()
+        ;(collisionSphere1Ref.current.material as THREE.Material).dispose()
+        collisionSphere1Ref.current = null
+      }
+      if (collisionSphere2Ref.current) {
+        scene.remove(collisionSphere2Ref.current)
+        collisionSphere2Ref.current.geometry.dispose()
+        ;(collisionSphere2Ref.current.material as THREE.Material).dispose()
+        collisionSphere2Ref.current = null
+      }
+      
+      // Create explosion flash
+      if (!explosionFlashRef.current) {
+        const geo = new THREE.SphereGeometry(1, 16, 16)
+        const mat = new THREE.MeshBasicMaterial({ 
+          color: 0xffffff, 
+          transparent: true,
+          opacity: 1
+        })
+        const mesh = new THREE.Mesh(geo, mat)
+        mesh.name = 'EXPLOSION_FLASH'
+        scene.add(mesh)
+        explosionFlashRef.current = mesh
+      }
+      
+      // Flash grows and fades
+      const flashSize = sphereRadius * (0.5 + flashProgress * 2)
+      explosionFlashRef.current.scale.setScalar(flashSize)
+      const mat = explosionFlashRef.current.material as THREE.MeshBasicMaterial
+      mat.opacity = 1 - flashProgress * 0.8
+      
+      state.phase = 'collision'
+    }
     
-    const material = new THREE.PointsMaterial({
-      size: 0.6,
-      vertexColors: true,
-      transparent: true,
-      opacity: 1.0,
-      sizeAttenuation: true,
-      map: circleTexture,
-      alphaMap: circleTexture,
-      depthWrite: false,
-    })
+    // Phase 4: Explosion particles scatter to galaxy (75-100)
+    else if (galaxyStars > 75) {
+      const progress = (galaxyStars - 75) / 25 // 0 to 1
+      
+      // Remove flash
+      if (explosionFlashRef.current) {
+        scene.remove(explosionFlashRef.current)
+        explosionFlashRef.current.geometry.dispose()
+        ;(explosionFlashRef.current.material as THREE.Material).dispose()
+        explosionFlashRef.current = null
+      }
+      
+      // Create or update explosion particles
+      if (!explosionParticlesRef.current && starPoolRef.current) {
+        // Initialize particle positions at center, velocities outward
+        const numParticles = maxStars
+        const positions = new Float32Array(numParticles * 3)
+        const colors = new Float32Array(numParticles * 3)
+        
+        // Copy colors from star pool
+        colors.set(starPoolRef.current.colors)
+        
+        // All particles start at center
+        for (let i = 0; i < numParticles; i++) {
+          positions[i * 3] = 0
+          positions[i * 3 + 1] = 0
+          positions[i * 3 + 2] = 0
+        }
+        
+        // Store target positions (final galaxy positions)
+        state.particleTargets = new Float32Array(starPoolRef.current.positions)
+        state.particlePositions = positions
+        
+        const geometry = new THREE.BufferGeometry()
+        geometry.setAttribute('position', new THREE.BufferAttribute(positions, 3))
+        geometry.setAttribute('color', new THREE.BufferAttribute(colors, 3))
+        
+        // Create circular texture for round points
+        const canvas = document.createElement('canvas')
+        canvas.width = 64
+        canvas.height = 64
+        const ctx = canvas.getContext('2d')!
+        const gradient = ctx.createRadialGradient(32, 32, 0, 32, 32, 32)
+        gradient.addColorStop(0, 'rgba(255,255,255,1)')
+        gradient.addColorStop(0.5, 'rgba(255,255,255,0.8)')
+        gradient.addColorStop(1, 'rgba(255,255,255,0)')
+        ctx.fillStyle = gradient
+        ctx.fillRect(0, 0, 64, 64)
+        const circleTexture = new THREE.CanvasTexture(canvas)
+        
+        const material = new THREE.PointsMaterial({
+          size: 0.6,
+          vertexColors: true,
+          transparent: true,
+          opacity: 1.0,
+          sizeAttenuation: true,
+          map: circleTexture,
+          alphaMap: circleTexture,
+          depthWrite: false,
+        })
+        
+        const particles = new THREE.Points(geometry, material)
+        particles.name = 'EXPLOSION_PARTICLES'
+        scene.add(particles)
+        explosionParticlesRef.current = particles
+      }
+      
+      // Animate particles from center to final galaxy positions
+      if (explosionParticlesRef.current && state.particleTargets && state.particlePositions) {
+        const positions = explosionParticlesRef.current.geometry.getAttribute('position') as THREE.BufferAttribute
+        const targets = state.particleTargets
+        
+        // Ease-out for explosion settling
+        const easeOut = 1 - Math.pow(1 - progress, 3)
+        
+        for (let i = 0; i < maxStars; i++) {
+          // Interpolate from center (0,0,0) to target position
+          positions.array[i * 3] = targets[i * 3] * easeOut
+          positions.array[i * 3 + 1] = targets[i * 3 + 1] * easeOut
+          positions.array[i * 3 + 2] = targets[i * 3 + 2] * easeOut
+        }
+        
+        positions.needsUpdate = true
+      }
+      
+      state.phase = 'explosion'
+      state.explosionProgress = progress
+    }
     
-    const stars = new THREE.Points(geometry, material)
-    stars.name = 'GALAXY_STARS'
-    scene.add(stars)
-    galaxyStarsRef.current = stars
   }, [galaxyStars, showPoints, scene])
 
   // Paths effect - animated paths through star field
@@ -1293,10 +1510,11 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   const sculptureCurveRef = useRef<THREE.Vector3[]>([])
   const pathsPhaseRef = useRef<number>(-1) // Track current phase to avoid recreating on every slider tick
   
-  // Store star positions when galaxy stars are created
+  // Store star positions when explosion particles are created (for paths effect)
   useEffect(() => {
-    if (galaxyStarsRef.current && galaxyStars > 0) {
-      const positions = galaxyStarsRef.current.geometry.getAttribute('position')
+    // Use explosion particles or star pool for star positions
+    if (explosionParticlesRef.current && galaxyStars > 75) {
+      const positions = explosionParticlesRef.current.geometry.getAttribute('position')
       if (positions) {
         const stars: THREE.Vector3[] = []
         for (let i = 0; i < positions.count; i++) {
@@ -1308,6 +1526,18 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         }
         galaxyStarPositionsRef.current = stars
       }
+    } else if (starPoolRef.current && galaxyStars > 75) {
+      // Use star pool positions directly
+      const positions = starPoolRef.current.positions
+      const stars: THREE.Vector3[] = []
+      for (let i = 0; i < maxStars; i++) {
+        stars.push(new THREE.Vector3(
+          positions[i * 3],
+          positions[i * 3 + 1],
+          positions[i * 3 + 2]
+        ))
+      }
+      galaxyStarPositionsRef.current = stars
     }
   }, [galaxyStars, showPoints])
   
