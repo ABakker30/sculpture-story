@@ -1307,20 +1307,26 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       const maxSphereSize = sphereRadius * 0.3
       const currentSize = maxSphereSize * progress
       
-      // Create or update sphere 1 (high resolution, sculpture material)
+      // Create sphere 1 once (high resolution, fully opaque sculpture material)
       if (!collisionSphere1Ref.current) {
-        const geo = new THREE.SphereGeometry(1, 64, 48)
+        const geo = new THREE.SphereGeometry(1, 128, 96)
         const mat = materialController.getMaterial().clone()
+        mat.transparent = false
+        mat.opacity = 1
+        mat.depthWrite = true
         const mesh = new THREE.Mesh(geo, mat)
         mesh.name = 'COLLISION_SPHERE_1'
         scene.add(mesh)
         collisionSphere1Ref.current = mesh
       }
       
-      // Create or update sphere 2 (high resolution, sculpture material)
+      // Create sphere 2 once (high resolution, fully opaque sculpture material)
       if (!collisionSphere2Ref.current) {
-        const geo = new THREE.SphereGeometry(1, 64, 48)
+        const geo = new THREE.SphereGeometry(1, 128, 96)
         const mat = materialController.getMaterial().clone()
+        mat.transparent = false
+        mat.opacity = 1
+        mat.depthWrite = true
         const mesh = new THREE.Mesh(geo, mat)
         mesh.name = 'COLLISION_SPHERE_2'
         scene.add(mesh)
