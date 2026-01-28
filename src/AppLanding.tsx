@@ -1744,8 +1744,6 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   const animatedShapesRef = useRef<{ line: THREE.Line, points: THREE.Vector3[], progress: number, speed: number, segmentIndex: number }[]>([])
   const sculpturePathRef = useRef<THREE.Vector3[]>([])
   const sculptureCurveRef = useRef<THREE.Vector3[]>([])
-  const _pathsPhaseRef = useRef<number>(-1) // Track current phase to avoid recreating on every slider tick
-  
   // Store star positions when explosion particles are created (for paths effect)
   useEffect(() => {
     // Use explosion particles or star pool for star positions
@@ -1776,21 +1774,6 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       galaxyStarPositionsRef.current = stars
     }
   }, [galaxyStars, showPoints])
-  
-  // Constellation patterns (reserved for future use)
-  const _constellations = {
-    bigDipper: [
-      [0, 0, 0], [1.5, 0.2, 0.5], [2.8, 0.5, 0.8], [4.2, 0.3, 0.4],
-      [5.2, -0.8, 0.2], [5.8, 0.8, 0.6], [7.0, 1.0, 0.3]
-    ],
-    orion: [
-      [0, 2, 0], [1, 1, 0], [2, 0, 0], [1, -1, 0], [0, -2, 0], // belt and body
-      [-1, 1.5, 0], [2.5, 1.5, 0] // shoulders
-    ],
-    triangle: [[0, 1, 0], [1, -0.5, 0], [-1, -0.5, 0], [0, 1, 0]],
-    square: [[0, 0, 0], [1, 0, 0], [1, 1, 0], [0, 1, 0], [0, 0, 0]],
-    pentagon: [[0, 1, 0], [0.95, 0.31, 0], [0.59, -0.81, 0], [-0.59, -0.81, 0], [-0.95, 0.31, 0], [0, 1, 0]]
-  }
   
   // Setup paths based on slider phase - redesigned cinematic flow
   // Phase sequence:
