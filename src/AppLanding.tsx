@@ -1744,7 +1744,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   const animatedShapesRef = useRef<{ line: THREE.Line, points: THREE.Vector3[], progress: number, speed: number, segmentIndex: number }[]>([])
   const sculpturePathRef = useRef<THREE.Vector3[]>([])
   const sculptureCurveRef = useRef<THREE.Vector3[]>([])
-  const pathsPhaseRef = useRef<number>(-1) // Track current phase to avoid recreating on every slider tick
+  const _pathsPhaseRef = useRef<number>(-1) // Track current phase to avoid recreating on every slider tick
   
   // Store star positions when explosion particles are created (for paths effect)
   useEffect(() => {
@@ -1777,8 +1777,8 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     }
   }, [galaxyStars, showPoints])
   
-  // Constellation patterns
-  const constellations = {
+  // Constellation patterns (reserved for future use)
+  const _constellations = {
     bigDipper: [
       [0, 0, 0], [1.5, 0.2, 0.5], [2.8, 0.5, 0.8], [4.2, 0.3, 0.4],
       [5.2, -0.8, 0.2], [5.8, 0.8, 0.6], [7.0, 1.0, 0.3]
