@@ -955,6 +955,31 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     
   }, [bondDensity, starScale, starDensity, cosmicScale, galaxySize, initialized, scene])
 
+  // Hide base scene objects during Paths chapter
+  useEffect(() => {
+    if (showPaths) {
+      // Hide cross sections, corner spheres, hull lines for entire Paths chapter
+      if (crossSectionsRef.current) crossSectionsRef.current.visible = false
+      if (spheresRef.current) spheresRef.current.visible = false
+      if (hullLinesRef.current) hullLinesRef.current.visible = false
+      
+      // Hide stars and bonds only during white phase (65%+)
+      if (pathsValue >= 65) {
+        if (starsRef.current) starsRef.current.visible = false
+        if (bondsRef.current) bondsRef.current.visible = false
+      } else {
+        if (starsRef.current) starsRef.current.visible = true
+        if (bondsRef.current) bondsRef.current.visible = true
+      }
+    } else {
+      if (starsRef.current) starsRef.current.visible = true
+      if (bondsRef.current) bondsRef.current.visible = true
+      if (spheresRef.current) spheresRef.current.visible = true
+      if (crossSectionsRef.current) crossSectionsRef.current.visible = true
+      // Don't auto-show hull - that's controlled by showHull
+    }
+  }, [showPaths, pathsValue])
+
   // Corner spheres effect
   useEffect(() => {
     if (!initialized || !dataRef.current) return
@@ -1157,8 +1182,15 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   
   // Fade sculpture based on Points slider (0-20% = fade out, 20%+ = invisible)
   // Keep hidden during Profiled animation, only show at profiledValue=100
+  // Also hide during Paths white phase (65%+)
   useEffect(() => {
     if (meshRef.current) {
+      // Hide during Paths white phase (65%+)
+      if (showPaths && pathsValue >= 65) {
+        meshRef.current.visible = false
+        return
+      }
+      
       if (showProfiled) {
         // During Profiled phase - hide original mesh (Profiled effect draws its own)
         // Only show at 100% when animation is complete
@@ -1197,7 +1229,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         }
       }
     }
-  }, [showPoints, showProfiled, profiledValue, galaxyStars])
+  }, [showPoints, showPaths, pathsValue, showProfiled, profiledValue, galaxyStars])
   
   // Pre-computed star positions pool (seeded for determinism)
   const starPoolRef = useRef<{ positions: Float32Array, colors: Float32Array } | null>(null)
@@ -1287,9 +1319,46 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       return
     }
     
-    // Phase 1: Spheres emerge and grow (20-40)
-    if (galaxyStars > 20 && galaxyStars <= 40) {
-      // Remove explosion/galaxy objects if going back
+    // Hide Points chapter stars when Paths is in dissolve/contraction phase (35%+)
+    if (showPaths && pathsValue >= 35) {
+      // Fade out and hide the explosion particles
+      if (explosionParticlesRef.current) {
+        const fadeProgress = Math.min(1, (pathsValue - 35) / 15) // Fully hidden by 50%
+        const material = explosionParticlesRef.current.material as THREE.PointsMaterial
+        material.opacity = Math.max(0, 1 - fadeProgress * 2)
+        if (fadeProgress >= 0.5) {
+          explosionParticlesRef.current.visible = false
+        }
+      }
+      if (galaxyStarsRef.current) {
+        galaxyStarsRef.current.visible = false
+      }
+      // Also hide collision spheres during Paths dissolve
+      if (collisionSphere1Ref.current) collisionSphere1Ref.current.visible = false
+      if (collisionSphere2Ref.current) collisionSphere2Ref.current.visible = false
+      if (explosionFlashRef.current) explosionFlashRef.current.visible = false
+      return
+    } else {
+      // Make sure they're visible when not in dissolve phase
+      if (explosionParticlesRef.current) {
+        explosionParticlesRef.current.visible = true
+        const material = explosionParticlesRef.current.material as THREE.PointsMaterial
+        material.opacity = 1.0
+      }
+      if (galaxyStarsRef.current) {
+        galaxyStarsRef.current.visible = true
+      }
+    }
+    
+    // Phase 1: First sphere appears along elliptical arc (20-35)
+    if (galaxyStars > 20 && galaxyStars <= 35) {
+      // Remove all later-phase objects when scrubbing back
+      if (explosionFlashRef.current) {
+        scene.remove(explosionFlashRef.current)
+        explosionFlashRef.current.geometry.dispose()
+        ;(explosionFlashRef.current.material as THREE.Material).dispose()
+        explosionFlashRef.current = null
+      }
       if (explosionParticlesRef.current) {
         scene.remove(explosionParticlesRef.current)
         explosionParticlesRef.current.geometry.dispose()
@@ -1302,10 +1371,17 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         ;(galaxyStarsRef.current.material as THREE.PointsMaterial).dispose()
         galaxyStarsRef.current = null
       }
+      if (collisionSphere2Ref.current) {
+        scene.remove(collisionSphere2Ref.current)
+        collisionSphere2Ref.current.geometry.dispose()
+        ;(collisionSphere2Ref.current.material as THREE.Material).dispose()
+        collisionSphere2Ref.current = null
+      }
       
-      const progress = (galaxyStars - 20) / 20 // 0 to 1
-      const maxSphereSize = sphereRadius * 0.3
-      const currentSize = maxSphereSize * progress
+      const progress = (galaxyStars - 20) / 15 // 0 to 1
+      const maxSphereSize = sphereRadius * 0.25
+      // Sphere grows from tiny to full size
+      const currentSize = maxSphereSize * Math.min(1, progress * 2) // Full size by progress=0.5
       
       // Create sphere 1 once (high resolution, fully opaque sculpture material)
       if (!collisionSphere1Ref.current) {
@@ -1320,7 +1396,63 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         collisionSphere1Ref.current = mesh
       }
       
-      // Create sphere 2 once (high resolution, fully opaque sculpture material)
+      // Sphere 1 follows a smooth curved path using quadratic bezier
+      // Use unified t calculation: slider 20-65 maps to bezier t=0-1
+      const t = (galaxyStars - 20) / 45 // Direct mapping: 0 to 1 over full journey
+      
+      // Control points for smooth quadratic bezier curve
+      const p0 = new THREE.Vector3(sphereRadius * 2.5, sphereRadius * 0.3, sphereRadius * 0.3) // Start: right side
+      const p1 = new THREE.Vector3(-sphereRadius * 1.5, sphereRadius * 1.2, sphereRadius * 0.2) // Control: upper left arc
+      const p2 = new THREE.Vector3(0, 0, 0) // End: center (collision point)
+      
+      // Quadratic bezier: B(t) = (1-t)²P0 + 2(1-t)tP1 + t²P2
+      const oneMinusT = 1 - t
+      state.sphere1Pos.set(
+        oneMinusT * oneMinusT * p0.x + 2 * oneMinusT * t * p1.x + t * t * p2.x,
+        oneMinusT * oneMinusT * p0.y + 2 * oneMinusT * t * p1.y + t * t * p2.y,
+        oneMinusT * oneMinusT * p0.z + 2 * oneMinusT * t * p1.z + t * t * p2.z
+      )
+      
+      collisionSphere1Ref.current.position.copy(state.sphere1Pos)
+      collisionSphere1Ref.current.scale.setScalar(Math.max(0.01, currentSize))
+      
+      state.sphere1Scale = currentSize
+      state.phase = 'spheres'
+    }
+    
+    // Phase 2: Second sphere appears, both approach for collision (35-55)
+    else if (galaxyStars > 35 && galaxyStars <= 55) {
+      // Remove later-phase objects when scrubbing back
+      if (explosionFlashRef.current) {
+        scene.remove(explosionFlashRef.current)
+        explosionFlashRef.current.geometry.dispose()
+        ;(explosionFlashRef.current.material as THREE.Material).dispose()
+        explosionFlashRef.current = null
+      }
+      if (explosionParticlesRef.current) {
+        scene.remove(explosionParticlesRef.current)
+        explosionParticlesRef.current.geometry.dispose()
+        ;(explosionParticlesRef.current.material as THREE.Material).dispose()
+        explosionParticlesRef.current = null
+      }
+      
+      const progress = (galaxyStars - 35) / 20 // 0 to 1
+      const maxSphereSize = sphereRadius * 0.25
+      
+      // Create sphere 1 if not exists
+      if (!collisionSphere1Ref.current) {
+        const geo = new THREE.SphereGeometry(1, 128, 96)
+        const mat = materialController.getMaterial().clone()
+        mat.transparent = false
+        mat.opacity = 1
+        mat.depthWrite = true
+        const mesh = new THREE.Mesh(geo, mat)
+        mesh.name = 'COLLISION_SPHERE_1'
+        scene.add(mesh)
+        collisionSphere1Ref.current = mesh
+      }
+      
+      // Create sphere 2 once (surprise entrance from opposite side)
       if (!collisionSphere2Ref.current) {
         const geo = new THREE.SphereGeometry(1, 128, 96)
         const mat = materialController.getMaterial().clone()
@@ -1333,53 +1465,150 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         collisionSphere2Ref.current = mesh
       }
       
-      // Position spheres at opposite corners
-      const startDist = sphereRadius * 2
-      state.sphere1Pos.set(-startDist, startDist * 0.5, startDist * 0.3)
-      state.sphere2Pos.set(startDist, -startDist * 0.4, -startDist * 0.3)
+      // Sphere 1 continues on smooth bezier curve
+      // Use unified t calculation: slider 20-65 maps to bezier t=0-1
+      const t = (galaxyStars - 20) / 45 // Direct mapping for continuity
+      
+      // Same control points as phase 1 for continuity
+      const p0 = new THREE.Vector3(sphereRadius * 2.5, sphereRadius * 0.3, sphereRadius * 0.3)
+      const p1 = new THREE.Vector3(-sphereRadius * 1.5, sphereRadius * 1.2, sphereRadius * 0.2)
+      const p2 = new THREE.Vector3(0, 0, 0)
+      
+      // Quadratic bezier
+      const oneMinusT = 1 - t
+      state.sphere1Pos.set(
+        oneMinusT * oneMinusT * p0.x + 2 * oneMinusT * t * p1.x + t * t * p2.x,
+        oneMinusT * oneMinusT * p0.y + 2 * oneMinusT * t * p1.y + t * t * p2.y,
+        oneMinusT * oneMinusT * p0.z + 2 * oneMinusT * t * p1.z + t * t * p2.z
+      )
+      
+      // Sphere 2 follows smooth bezier curve from right side
+      // Use unified t calculation: slider 35-65 maps to bezier t=0-1
+      const t2 = (galaxyStars - 35) / 30 // Direct mapping for continuity
+      
+      // Control points for sphere 2's bezier curve
+      const q0 = new THREE.Vector3(sphereRadius * 3, -sphereRadius * 0.5, sphereRadius * 0.5) // Start: far right
+      const q1 = new THREE.Vector3(sphereRadius * 1.0, -sphereRadius * 0.3, sphereRadius * 0.3) // Control: gentle curve
+      const q2 = new THREE.Vector3(0, 0, 0) // End: center (collision point)
+      
+      // Quadratic bezier for sphere 2
+      const oneMinusT2 = 1 - t2
+      state.sphere2Pos.set(
+        oneMinusT2 * oneMinusT2 * q0.x + 2 * oneMinusT2 * t2 * q1.x + t2 * t2 * q2.x,
+        oneMinusT2 * oneMinusT2 * q0.y + 2 * oneMinusT2 * t2 * q1.y + t2 * t2 * q2.y,
+        oneMinusT2 * oneMinusT2 * q0.z + 2 * oneMinusT2 * t2 * q1.z + t2 * t2 * q2.z
+      )
+      
+      // Sphere 2 grows as it appears
+      const sphere2Size = maxSphereSize * Math.min(1, progress * 3) // Quick grow at start
       
       collisionSphere1Ref.current.position.copy(state.sphere1Pos)
-      collisionSphere1Ref.current.scale.setScalar(currentSize)
+      collisionSphere1Ref.current.scale.setScalar(maxSphereSize)
       collisionSphere2Ref.current.position.copy(state.sphere2Pos)
-      collisionSphere2Ref.current.scale.setScalar(currentSize)
+      collisionSphere2Ref.current.scale.setScalar(Math.max(0.01, sphere2Size))
       
-      state.sphere1Scale = currentSize
-      state.sphere2Scale = currentSize
-      state.phase = 'spheres'
+      state.sphere1Scale = maxSphereSize
+      state.sphere2Scale = sphere2Size
+      state.phase = 'approach'
     }
     
-    // Phase 2: Spheres approach and collide (40-70)
-    else if (galaxyStars > 40 && galaxyStars <= 70) {
-      const progress = (galaxyStars - 40) / 30 // 0 to 1
-      // Ease-in-out for approach, then accelerate at end
-      const easeProgress = progress < 0.7 
-        ? progress / 0.7 * 0.5 // Slow approach (0-0.5)
-        : 0.5 + ((progress - 0.7) / 0.3) * 0.5 // Fast final approach (0.5-1)
-      
-      const startDist = sphereRadius * 2
-      const start1 = new THREE.Vector3(-startDist, startDist * 0.5, startDist * 0.3)
-      const start2 = new THREE.Vector3(startDist, -startDist * 0.4, -startDist * 0.3)
-      const center = new THREE.Vector3(0, 0, 0)
-      
-      // Interpolate positions toward center
-      state.sphere1Pos.lerpVectors(start1, center, easeProgress)
-      state.sphere2Pos.lerpVectors(start2, center, easeProgress)
-      
-      if (collisionSphere1Ref.current) {
-        collisionSphere1Ref.current.position.copy(state.sphere1Pos)
+    // Phase 3: Final rapid approach and collision (55-65)
+    else if (galaxyStars > 55 && galaxyStars <= 65) {
+      // Remove later-phase objects when scrubbing back
+      if (explosionFlashRef.current) {
+        scene.remove(explosionFlashRef.current)
+        explosionFlashRef.current.geometry.dispose()
+        ;(explosionFlashRef.current.material as THREE.Material).dispose()
+        explosionFlashRef.current = null
       }
-      if (collisionSphere2Ref.current) {
-        collisionSphere2Ref.current.position.copy(state.sphere2Pos)
+      if (explosionParticlesRef.current) {
+        scene.remove(explosionParticlesRef.current)
+        explosionParticlesRef.current.geometry.dispose()
+        ;(explosionParticlesRef.current.material as THREE.Material).dispose()
+        explosionParticlesRef.current = null
       }
+      
+      const maxSphereSize = sphereRadius * 0.25
+      
+      // Create spheres if they don't exist (for slider scrubbing)
+      if (!collisionSphere1Ref.current) {
+        const geo = new THREE.SphereGeometry(1, 128, 96)
+        const mat = materialController.getMaterial().clone()
+        mat.transparent = false
+        mat.opacity = 1
+        mat.depthWrite = true
+        const mesh = new THREE.Mesh(geo, mat)
+        mesh.name = 'COLLISION_SPHERE_1'
+        scene.add(mesh)
+        collisionSphere1Ref.current = mesh
+      }
+      if (!collisionSphere2Ref.current) {
+        const geo = new THREE.SphereGeometry(1, 128, 96)
+        const mat = materialController.getMaterial().clone()
+        mat.transparent = false
+        mat.opacity = 1
+        mat.depthWrite = true
+        const mesh = new THREE.Mesh(geo, mat)
+        mesh.name = 'COLLISION_SPHERE_2'
+        scene.add(mesh)
+        collisionSphere2Ref.current = mesh
+      }
+      
+      // Sphere 1 continues on smooth bezier curve - final stretch
+      // Use unified t calculation: slider 20-65 maps to bezier t=0-1
+      const t = (galaxyStars - 20) / 45 // Direct mapping for continuity
+      
+      // Same control points for continuity
+      const p0 = new THREE.Vector3(sphereRadius * 2.5, sphereRadius * 0.3, sphereRadius * 0.3)
+      const p1 = new THREE.Vector3(-sphereRadius * 1.5, sphereRadius * 1.2, sphereRadius * 0.2)
+      const p2 = new THREE.Vector3(0, 0, 0)
+      
+      // Quadratic bezier
+      const oneMinusT = 1 - t
+      state.sphere1Pos.set(
+        oneMinusT * oneMinusT * p0.x + 2 * oneMinusT * t * p1.x + t * t * p2.x,
+        oneMinusT * oneMinusT * p0.y + 2 * oneMinusT * t * p1.y + t * t * p2.y,
+        oneMinusT * oneMinusT * p0.z + 2 * oneMinusT * t * p1.z + t * t * p2.z
+      )
+      
+      // Sphere 2 continues on smooth bezier curve - final stretch
+      // Use unified t calculation: slider 35-65 maps to bezier t=0-1
+      const t2 = (galaxyStars - 35) / 30 // Direct mapping for continuity
+      
+      // Same control points for sphere 2 continuity
+      const q0 = new THREE.Vector3(sphereRadius * 3, -sphereRadius * 0.5, sphereRadius * 0.5)
+      const q1 = new THREE.Vector3(sphereRadius * 1.0, -sphereRadius * 0.3, sphereRadius * 0.3)
+      const q2 = new THREE.Vector3(0, 0, 0)
+      
+      // Quadratic bezier for sphere 2
+      const oneMinusT2 = 1 - t2
+      state.sphere2Pos.set(
+        oneMinusT2 * oneMinusT2 * q0.x + 2 * oneMinusT2 * t2 * q1.x + t2 * t2 * q2.x,
+        oneMinusT2 * oneMinusT2 * q0.y + 2 * oneMinusT2 * t2 * q1.y + t2 * t2 * q2.y,
+        oneMinusT2 * oneMinusT2 * q0.z + 2 * oneMinusT2 * t2 * q1.z + t2 * t2 * q2.z
+      )
+      
+      collisionSphere1Ref.current.position.copy(state.sphere1Pos)
+      collisionSphere1Ref.current.scale.setScalar(maxSphereSize)
+      collisionSphere2Ref.current.position.copy(state.sphere2Pos)
+      collisionSphere2Ref.current.scale.setScalar(maxSphereSize)
       
       state.phase = 'approach'
     }
     
-    // Phase 3: Collision flash and explosion (70-75)
-    else if (galaxyStars > 70 && galaxyStars <= 75) {
-      const flashProgress = (galaxyStars - 70) / 5 // 0 to 1
+    // Phase 4: Collision flash (65-72) - high-res sphere with sculpture material
+    else if (galaxyStars > 65 && galaxyStars <= 72) {
+      // Remove later-phase objects when scrubbing back
+      if (explosionParticlesRef.current) {
+        scene.remove(explosionParticlesRef.current)
+        explosionParticlesRef.current.geometry.dispose()
+        ;(explosionParticlesRef.current.material as THREE.Material).dispose()
+        explosionParticlesRef.current = null
+      }
       
-      // Remove spheres
+      const flashProgress = (galaxyStars - 65) / 7 // 0 to 1
+      
+      // Remove collision spheres
       if (collisionSphere1Ref.current) {
         scene.remove(collisionSphere1Ref.current)
         collisionSphere1Ref.current.geometry.dispose()
@@ -1393,32 +1622,33 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
         collisionSphere2Ref.current = null
       }
       
-      // Create explosion flash
+      // Create explosion flash sphere (high-res, sculpture material)
       if (!explosionFlashRef.current) {
-        const geo = new THREE.SphereGeometry(1, 16, 16)
-        const mat = new THREE.MeshBasicMaterial({ 
-          color: 0xffffff, 
-          transparent: true,
-          opacity: 1
-        })
+        const geo = new THREE.SphereGeometry(1, 128, 96)
+        const mat = materialController.getMaterial().clone()
+        mat.transparent = true
+        mat.opacity = 1
+        mat.emissive = new THREE.Color(0xffffff)
+        mat.emissiveIntensity = 2
         const mesh = new THREE.Mesh(geo, mat)
         mesh.name = 'EXPLOSION_FLASH'
         scene.add(mesh)
         explosionFlashRef.current = mesh
       }
       
-      // Flash grows and fades
-      const flashSize = sphereRadius * (0.5 + flashProgress * 2)
+      // Flash grows rapidly and fades
+      const flashSize = sphereRadius * (0.3 + flashProgress * 1.5)
       explosionFlashRef.current.scale.setScalar(flashSize)
-      const mat = explosionFlashRef.current.material as THREE.MeshBasicMaterial
-      mat.opacity = 1 - flashProgress * 0.8
+      const mat = explosionFlashRef.current.material as THREE.MeshStandardMaterial
+      mat.opacity = 1 - flashProgress * 0.7
+      mat.emissiveIntensity = 2 * (1 - flashProgress)
       
       state.phase = 'collision'
     }
     
-    // Phase 4: Explosion particles scatter to galaxy (75-100)
-    else if (galaxyStars > 75) {
-      const progress = (galaxyStars - 75) / 25 // 0 to 1
+    // Phase 5: Explosion particles scatter to galaxy (72-100)
+    else if (galaxyStars > 72) {
+      const progress = (galaxyStars - 72) / 28 // 0 to 1
       
       // Remove flash
       if (explosionFlashRef.current) {
@@ -1505,12 +1735,12 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
       state.explosionProgress = progress
     }
     
-  }, [galaxyStars, showPoints, scene])
+  }, [galaxyStars, showPoints, showPaths, pathsValue, scene])
 
   // Paths effect - animated paths through star field
   const pathsGroupRef = useRef<THREE.Group | null>(null)
   const galaxyStarPositionsRef = useRef<THREE.Vector3[]>([])
-  const shootingStarsRef = useRef<{ line: THREE.Line, start: THREE.Vector3, end: THREE.Vector3, progress: number, speed: number }[]>([])
+  const shootingStarsRef = useRef<{ mesh: THREE.Mesh, head: THREE.Mesh, start: THREE.Vector3, end: THREE.Vector3 }[]>([])
   const animatedShapesRef = useRef<{ line: THREE.Line, points: THREE.Vector3[], progress: number, speed: number, segmentIndex: number }[]>([])
   const sculpturePathRef = useRef<THREE.Vector3[]>([])
   const sculptureCurveRef = useRef<THREE.Vector3[]>([])
@@ -1562,35 +1792,28 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     pentagon: [[0, 1, 0], [0.95, 0.31, 0], [0.59, -0.81, 0], [-0.59, -0.81, 0], [-0.95, 0.31, 0], [0, 1, 0]]
   }
   
-  // Setup paths based on slider phase
+  // Setup paths based on slider phase - redesigned cinematic flow
+  // Phase sequence:
+  // 0-5%: End state of Points chapter (galaxy stars)
+  // 5-20%: Shooting stars animate between points
+  // 20-35%: Geometric shapes form (triangle, square)
+  // 35-50%: Faint lines reveal connecting neighboring points
+  // 50-65%: Zoom in, all points/lines contract inward
+  // 65-72%: White flash transition
+  // 72-80%: White space with black speck
+  // 80-100%: Zoom into speck, reveal lattice structure
   useEffect(() => {
-    // Determine current phase (0-20, 20-40, 40-55, 55-70, 70-100)
-    let currentPhase = -1
-    if (!showPaths || pathsValue === 0) {
-      currentPhase = -1
-    } else if (pathsValue <= 20) {
-      currentPhase = 1 // Shooting stars
-    } else if (pathsValue <= 40) {
-      currentPhase = 2 // Growing paths
-    } else if (pathsValue <= 55) {
-      currentPhase = 3 // Shapes
-    } else if (pathsValue <= 70) {
-      currentPhase = 4 // Constellations
-    } else {
-      currentPhase = 5 // Sculpture path
-    }
-    
-    // Only recreate if phase changed
-    if (currentPhase === pathsPhaseRef.current) return
-    pathsPhaseRef.current = currentPhase
-    
     // Cleanup existing
     if (pathsGroupRef.current) {
       scene.remove(pathsGroupRef.current)
       pathsGroupRef.current.traverse((obj) => {
-        if (obj instanceof THREE.Line || obj instanceof THREE.LineSegments) {
+        if (obj instanceof THREE.Mesh || obj instanceof THREE.Line || obj instanceof THREE.LineSegments || obj instanceof THREE.Points) {
           obj.geometry.dispose()
-          ;(obj.material as THREE.Material).dispose()
+          if (Array.isArray(obj.material)) {
+            obj.material.forEach(m => m.dispose())
+          } else {
+            ;(obj.material as THREE.Material).dispose()
+          }
         }
       })
       pathsGroupRef.current = null
@@ -1598,160 +1821,543 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     shootingStarsRef.current = []
     animatedShapesRef.current = []
     
-    if (!showPaths || pathsValue === 0) return
+    if (!showPaths || pathsValue === 0) {
+      // Restore scene background to default when Paths is inactive
+      scene.background = new THREE.Color(0x0a0a0a)
+      return
+    }
+    
+    // Restore scene background if before white phase
+    if (pathsValue < 65) {
+      scene.background = new THREE.Color(0x0a0a0a)
+    }
     
     const group = new THREE.Group()
     group.name = 'PATHS_GROUP'
-    const stars = galaxyStarPositionsRef.current
     const sphereRadius = sculptureRadiusRef.current * 3
+    const stars = galaxyStarPositionsRef.current
     
-    if (pathsValue <= 20) {
-      // Phase 1: Shooting stars (0-20%)
-      const numShooters = Math.floor((pathsValue / 20) * 15) + 5
-      for (let i = 0; i < numShooters; i++) {
-        const startIdx = Math.floor(Math.random() * Math.max(1, stars.length))
-        const start = stars.length > 0 ? stars[startIdx].clone() : new THREE.Vector3(
-          (Math.random() - 0.5) * sphereRadius * 2,
-          (Math.random() - 0.5) * sphereRadius * 2,
-          (Math.random() - 0.5) * sphereRadius * 2
-        )
-        const direction = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize()
-        const end = start.clone().add(direction.multiplyScalar(sphereRadius * 0.5))
+    // Get lattice configuration from sculpture path
+    const pathCorners = sculpturePathRef.current
+    const latticeConstant = latticeConstantRef.current
+    
+    // Calculate path center for lattice generation
+    const pathCenter = new THREE.Vector3()
+    if (pathCorners.length > 0) {
+      pathCorners.forEach(p => pathCenter.add(p))
+      pathCenter.divideScalar(pathCorners.length)
+    }
+    
+    // Define fixed shape positions - closer to center, smaller shapes
+    const shapePositions = [
+      new THREE.Vector3(-sphereRadius * 0.25, sphereRadius * 0.18, sphereRadius * 0.08),
+      new THREE.Vector3(sphereRadius * 0.22, sphereRadius * 0.12, -sphereRadius * 0.1),
+      new THREE.Vector3(sphereRadius * 0.05, -sphereRadius * 0.22, sphereRadius * 0.15),
+      new THREE.Vector3(-sphereRadius * 0.18, -sphereRadius * 0.12, -sphereRadius * 0.08),
+      new THREE.Vector3(sphereRadius * 0.25, -sphereRadius * 0.08, sphereRadius * 0.12),
+    ]
+    
+    // Fixed shooting star trajectories - start from edges, end at shape vertices
+    const shootingStarPaths = [
+      { start: new THREE.Vector3(-sphereRadius * 0.8, sphereRadius * 0.5, 0), end: shapePositions[0].clone() },
+      { start: new THREE.Vector3(sphereRadius * 0.7, sphereRadius * 0.6, -sphereRadius * 0.3), end: shapePositions[1].clone() },
+      { start: new THREE.Vector3(sphereRadius * 0.5, -sphereRadius * 0.7, sphereRadius * 0.4), end: shapePositions[2].clone() },
+      { start: new THREE.Vector3(-sphereRadius * 0.6, -sphereRadius * 0.5, -sphereRadius * 0.4), end: shapePositions[3].clone() },
+      { start: new THREE.Vector3(sphereRadius * 0.8, sphereRadius * 0.15, sphereRadius * 0.5), end: shapePositions[4].clone() },
+    ]
+    
+    // Phase 1: End state of Points chapter - galaxy stars (0-5%)
+    if (pathsValue <= 5) {
+      // Galaxy stars are already visible from the Points chapter
+      // Add subtle twinkling enhancement
+      const twinkleCount = Math.min(50, stars.length)
+      if (twinkleCount > 0) {
+        const twinklePositions: number[] = []
+        const twinkleProgress = pathsValue / 5
         
-        const geometry = new THREE.BufferGeometry().setFromPoints([start, start])
-        const material = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.8 })
-        const line = new THREE.Line(geometry, material)
-        group.add(line)
-        
-        shootingStarsRef.current.push({ line, start, end, progress: Math.random(), speed: 0.1 + Math.random() * 0.17 })
-      }
-    } else if (pathsValue <= 40) {
-      // Phase 2: Growing paths (20-40%) - 2 to 10 segments
-      const progress = (pathsValue - 20) / 20
-      const numSegments = Math.floor(progress * 8) + 2
-      const numPaths = Math.floor(progress * 4) + 1
-      
-      for (let p = 0; p < numPaths; p++) {
-        const pathPoints: THREE.Vector3[] = []
-        let currentPos = stars.length > 0 
-          ? stars[Math.floor(Math.random() * stars.length)].clone()
-          : new THREE.Vector3((Math.random() - 0.5) * sphereRadius, (Math.random() - 0.5) * sphereRadius, (Math.random() - 0.5) * sphereRadius)
-        pathPoints.push(currentPos.clone())
-        
-        for (let s = 0; s < numSegments; s++) {
-          const direction = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize()
-          currentPos = currentPos.clone().add(direction.multiplyScalar(sphereRadius * 0.15))
-          pathPoints.push(currentPos.clone())
+        for (let i = 0; i < twinkleCount; i++) {
+          const starIdx = Math.floor((i / twinkleCount) * stars.length)
+          const star = stars[starIdx] || new THREE.Vector3(
+            (Math.random() - 0.5) * sphereRadius * 2,
+            (Math.random() - 0.5) * sphereRadius * 2,
+            (Math.random() - 0.5) * sphereRadius * 2
+          )
+          twinklePositions.push(star.x, star.y, star.z)
         }
         
-        const geometry = new THREE.BufferGeometry().setFromPoints(pathPoints)
-        const material = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.6 })
-        const line = new THREE.Line(geometry, material)
-        group.add(line)
-      }
-    } else if (pathsValue <= 55) {
-      // Phase 3a: Geometric shapes (40-55%) - animated drawing
-      const progress = (pathsValue - 40) / 15
-      const shapes = [constellations.triangle, constellations.square, constellations.pentagon]
-      const numShapes = Math.floor(progress * 6) + 3
-      
-      for (let i = 0; i < numShapes; i++) {
-        const shape = shapes[i % shapes.length]
-        const scale = sphereRadius * 0.3
-        const offset = new THREE.Vector3(
-          (Math.random() - 0.5) * sphereRadius,
-          (Math.random() - 0.5) * sphereRadius,
-          (Math.random() - 0.5) * sphereRadius
-        )
-        const points = shape.map(p => new THREE.Vector3(p[0] * scale + offset.x, p[1] * scale + offset.y, p[2] * scale + offset.z))
+        const twinkleGeo = new THREE.BufferGeometry()
+        twinkleGeo.setAttribute('position', new THREE.Float32BufferAttribute(twinklePositions, 3))
         
-        // Start with empty line, will be animated
-        const geometry = new THREE.BufferGeometry().setFromPoints([points[0], points[0]])
-        const material = new THREE.LineBasicMaterial({ color: 0x88aaff, transparent: true, opacity: 0.8 })
-        const line = new THREE.Line(geometry, material)
-        group.add(line)
+        const twinkleMat = new THREE.PointsMaterial({
+          color: 0xffffff,
+          size: sphereRadius * 0.02,
+          transparent: true,
+          opacity: 0.6 + twinkleProgress * 0.3,
+          sizeAttenuation: true
+        })
         
-        animatedShapesRef.current.push({ line, points, progress: Math.random(), speed: 0.05 + Math.random() * 0.033, segmentIndex: 0 })
+        group.add(new THREE.Points(twinkleGeo, twinkleMat))
       }
-    } else if (pathsValue <= 70) {
-      // Phase 3b: Constellations (55-70%) - animated drawing
-      const progress = (pathsValue - 55) / 15
-      const scale = sphereRadius * 0.15
+    }
+    
+    // Phase 2: Shooting stars with connecting trails (5-20%)
+    else if (pathsValue <= 20) {
+      const progress = (pathsValue - 5) / 15 // 0 to 1
       
-      // Big Dipper
-      if (progress > 0) {
-        const offset = new THREE.Vector3(-sphereRadius * 0.3, sphereRadius * 0.2, 0)
-        const points = constellations.bigDipper.map(p => new THREE.Vector3(p[0] * scale + offset.x, p[1] * scale + offset.y, p[2] * scale + offset.z))
-        const geometry = new THREE.BufferGeometry().setFromPoints([points[0], points[0]])
-        const material = new THREE.LineBasicMaterial({ color: 0xffffaa, transparent: true, opacity: 0.8 })
-        const line = new THREE.Line(geometry, material)
-        group.add(line)
-        animatedShapesRef.current.push({ line, points, progress: 0, speed: 0.04, segmentIndex: 0 })
-      }
-      
-      // Orion
-      if (progress > 0.5) {
-        const offset = new THREE.Vector3(sphereRadius * 0.3, -sphereRadius * 0.1, sphereRadius * 0.2)
-        const points = constellations.orion.map(p => new THREE.Vector3(p[0] * scale + offset.x, p[1] * scale + offset.y, p[2] * scale + offset.z))
-        const geometry = new THREE.BufferGeometry().setFromPoints([points[0], points[0]])
-        const material = new THREE.LineBasicMaterial({ color: 0xffaaaa, transparent: true, opacity: 0.8 })
-        const line = new THREE.Line(geometry, material)
-        group.add(line)
-        animatedShapesRef.current.push({ line, points, progress: 0, speed: 0.033, segmentIndex: 0 })
-      }
-    } else {
-      // Phase 4: Sculpture path reveal (70-100%)
-      const progress = (pathsValue - 70) / 30
-      
-      // Use actual sculpture path corners if available
-      const pathCorners = sculpturePathRef.current.length > 0 ? sculpturePathRef.current : []
-      
-      if (pathCorners.length >= 2) {
-        // Incremental reveal: show segments 1, then 1-2, then 1-2-3, etc.
-        // Close the path by adding first point at end
-        const closedPath = [...pathCorners, pathCorners[0]]
-        const totalSegments = closedPath.length - 1
-        const revealCycles = 3 // Number of times we restart
-        const cycleProgress = progress * revealCycles
-        const currentCycle = Math.floor(cycleProgress)
-        const withinCycle = cycleProgress - currentCycle
+      shootingStarPaths.forEach((path, i) => {
+        const starAppearTime = i * 0.15
+        const starProgress = Math.max(0, Math.min(1, (progress - starAppearTime) / 0.4))
         
-        const segmentsToShow = currentCycle >= revealCycles - 1 
-          ? totalSegments // Final cycle shows all
-          : Math.floor(withinCycle * totalSegments) + 1
+        if (starProgress <= 0) return
         
-        const points: THREE.Vector3[] = []
-        for (let i = 0; i <= Math.min(segmentsToShow, totalSegments); i++) {
-          points.push(closedPath[i].clone())
+        const headPos = new THREE.Vector3().lerpVectors(path.start, path.end, starProgress)
+        
+        const trailSegments = 20
+        const trailPositions: number[] = []
+        const trailColors: number[] = []
+        
+        for (let j = 0; j <= trailSegments; j++) {
+          const t = j / trailSegments
+          const segProgress = t * starProgress
+          const segPos = new THREE.Vector3().lerpVectors(path.start, path.end, segProgress)
+          trailPositions.push(segPos.x, segPos.y, segPos.z)
+          const brightness = t * t * 0.9 + 0.1
+          trailColors.push(brightness, brightness, brightness * 0.95)
         }
         
-        if (points.length >= 2) {
-          const geometry = new THREE.BufferGeometry().setFromPoints(points)
-          const material = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9, linewidth: 3 })
-          const line = new THREE.Line(geometry, material)
-          line.name = 'SCULPTURE_PATH'
-          group.add(line)
+        const trailGeo = new THREE.BufferGeometry()
+        trailGeo.setAttribute('position', new THREE.Float32BufferAttribute(trailPositions, 3))
+        trailGeo.setAttribute('color', new THREE.Float32BufferAttribute(trailColors, 3))
+        
+        const trailMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.8 })
+        group.add(new THREE.Line(trailGeo, trailMat))
+        
+        if (starProgress < 1) {
+          const headGeo = new THREE.SphereGeometry(sphereRadius * 0.006, 8, 6)
+          const headMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1 })
+          const headMesh = new THREE.Mesh(headGeo, headMat)
+          headMesh.position.copy(headPos)
+          group.add(headMesh)
+        }
+      })
+    }
+    
+    // Phase 3: Geometric shapes form - triangle then square (20-35%)
+    else if (pathsValue <= 35) {
+      const progress = (pathsValue - 20) / 15 // 0 to 1
+      const isTrianglePhase = progress < 0.5
+      
+      const drawShapeSegment = (startPos: THREE.Vector3, endPos: THREE.Vector3, segProgress: number) => {
+        if (segProgress <= 0) return
+        
+        const headPos = new THREE.Vector3().lerpVectors(startPos, endPos, Math.min(1, segProgress))
+        const trailSegments = 15
+        const trailPositions: number[] = []
+        const trailColors: number[] = []
+        
+        for (let j = 0; j <= trailSegments; j++) {
+          const t = j / trailSegments
+          const segPos = new THREE.Vector3().lerpVectors(startPos, headPos, t)
+          trailPositions.push(segPos.x, segPos.y, segPos.z)
+          const brightness = t * t * 0.9 + 0.1
+          trailColors.push(brightness, brightness, brightness * 0.95)
+        }
+        
+        const trailGeo = new THREE.BufferGeometry()
+        trailGeo.setAttribute('position', new THREE.Float32BufferAttribute(trailPositions, 3))
+        trailGeo.setAttribute('color', new THREE.Float32BufferAttribute(trailColors, 3))
+        const trailMat = new THREE.LineBasicMaterial({ vertexColors: true, transparent: true, opacity: 0.8 })
+        group.add(new THREE.Line(trailGeo, trailMat))
+        
+        if (segProgress < 1) {
+          const headGeo = new THREE.SphereGeometry(sphereRadius * 0.006, 8, 6)
+          const headMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 1 })
+          const headMesh = new THREE.Mesh(headGeo, headMat)
+          headMesh.position.copy(headPos)
+          group.add(headMesh)
+        }
+      }
+      
+      const relevantIndices = isTrianglePhase ? [0, 1, 2] : [1, 2, 3, 4]
+      relevantIndices.forEach((idx) => {
+        const dotGeo = new THREE.SphereGeometry(sphereRadius * 0.006, 8, 6)
+        const dotMat = new THREE.MeshBasicMaterial({ color: 0xffffff, transparent: true, opacity: 0.9 })
+        const dot = new THREE.Mesh(dotGeo, dotMat)
+        dot.position.copy(shapePositions[idx])
+        group.add(dot)
+      })
+      
+      if (isTrianglePhase) {
+        const triangleVerts = [shapePositions[0], shapePositions[1], shapePositions[2], shapePositions[0]]
+        const shapeProgress = progress * 2
+        const totalEdges = triangleVerts.length - 1
+        for (let i = 0; i < totalEdges; i++) {
+          const edgeStart = i / totalEdges
+          const edgeEnd = (i + 1) / totalEdges
+          const edgeProgress = Math.max(0, Math.min(1, (shapeProgress - edgeStart) / (edgeEnd - edgeStart)))
+          drawShapeSegment(triangleVerts[i], triangleVerts[i + 1], edgeProgress)
         }
       } else {
-        // Fallback: spiral if no sculpture path
-        const numSegments = Math.floor(progress * 50) + 5
-        const points: THREE.Vector3[] = []
-        for (let i = 0; i <= numSegments; i++) {
-          const t = i / numSegments
-          const angle = t * Math.PI * 4
-          const y = (t - 0.5) * sculptureRadiusRef.current * 2
-          const r = sculptureRadiusRef.current * 0.3
-          points.push(new THREE.Vector3(Math.cos(angle) * r, y, Math.sin(angle) * r))
+        const squareVerts = [shapePositions[1], shapePositions[2], shapePositions[3], shapePositions[4], shapePositions[1]]
+        const shapeProgress = (progress - 0.5) * 2
+        const totalEdges = squareVerts.length - 1
+        for (let i = 0; i < totalEdges; i++) {
+          const edgeStart = i / totalEdges
+          const edgeEnd = (i + 1) / totalEdges
+          const edgeProgress = Math.max(0, Math.min(1, (shapeProgress - edgeStart) / (edgeEnd - edgeStart)))
+          drawShapeSegment(squareVerts[i], squareVerts[i + 1], edgeProgress)
         }
-        const geometry = new THREE.BufferGeometry().setFromPoints(points)
-        const material = new THREE.LineBasicMaterial({ color: 0x00ffaa, transparent: true, opacity: 0.9 })
-        group.add(new THREE.Line(geometry, material))
+      }
+    }
+    
+    // Phase 4: Faint lines connecting neighboring points - hint at infinite paths (35-50%)
+    else if (pathsValue <= 50) {
+      const progress = (pathsValue - 35) / 15 // 0 to 1
+      
+      // Show completed shapes fading
+      const shapeFade = Math.max(0, 1 - progress * 2)
+      
+      // Draw fading shapes
+      if (shapeFade > 0.01) {
+        const triangleVerts = [shapePositions[0], shapePositions[1], shapePositions[2], shapePositions[0]]
+        const squareVerts = [shapePositions[1], shapePositions[2], shapePositions[3], shapePositions[4], shapePositions[1]]
+        
+        const drawFadingLine = (start: THREE.Vector3, end: THREE.Vector3, opacity: number) => {
+          const positions = [start.x, start.y, start.z, end.x, end.y, end.z]
+          const geo = new THREE.BufferGeometry()
+          geo.setAttribute('position', new THREE.Float32BufferAttribute(positions, 3))
+          const mat = new THREE.LineBasicMaterial({ color: 0xffffff, transparent: true, opacity })
+          group.add(new THREE.Line(geo, mat))
+        }
+        
+        for (let i = 0; i < triangleVerts.length - 1; i++) {
+          drawFadingLine(triangleVerts[i], triangleVerts[i + 1], shapeFade * 0.6)
+        }
+        for (let i = 0; i < squareVerts.length - 1; i++) {
+          drawFadingLine(squareVerts[i], squareVerts[i + 1], shapeFade * 0.6)
+        }
+      }
+      
+      // Cull to ~1000 stars closest to center for the network
+      const maxNetworkStars = 1000
+      const center = new THREE.Vector3(0, 0, 0)
+      const sortedByDistance = [...stars].sort((a, b) => a.distanceTo(center) - b.distanceTo(center))
+      const networkStars = sortedByDistance.slice(0, maxNetworkStars)
+      const unusedStars = sortedByDistance.slice(maxNetworkStars) // Stars NOT in network
+      
+      // Dissolve unused stars as progress increases
+      const unusedOpacity = Math.max(0, 1 - progress * 2) // Fully dissolved by 50% of phase
+      if (unusedStars.length > 0 && unusedOpacity > 0.01) {
+        const unusedPositions: number[] = []
+        for (const star of unusedStars) {
+          unusedPositions.push(star.x, star.y, star.z)
+        }
+        const unusedGeo = new THREE.BufferGeometry()
+        unusedGeo.setAttribute('position', new THREE.Float32BufferAttribute(unusedPositions, 3))
+        const unusedMat = new THREE.PointsMaterial({
+          color: 0xffffff,
+          size: sphereRadius * 0.01 * (1 - progress), // Shrink as they dissolve
+          transparent: true,
+          opacity: unusedOpacity * 0.6,
+          sizeAttenuation: true
+        })
+        group.add(new THREE.Points(unusedGeo, unusedMat))
+      }
+      
+      if (networkStars.length > 0) {
+        // Find nearest 3 neighbors for each star (build true dense network)
+        const findNearest3 = (starIdx: number): number[] => {
+          const distances: { idx: number, dist: number }[] = []
+          for (let j = 0; j < networkStars.length; j++) {
+            if (j === starIdx) continue
+            const dist = networkStars[starIdx].distanceTo(networkStars[j])
+            distances.push({ idx: j, dist })
+          }
+          distances.sort((a, b) => a.dist - b.dist)
+          return distances.slice(0, 3).map(d => d.idx)
+        }
+        
+        // Build unique connection pairs (each star to nearest 3)
+        const connectionSet = new Set<string>()
+        const connections: { a: number, b: number }[] = []
+        
+        for (let i = 0; i < networkStars.length; i++) {
+          const nearest = findNearest3(i)
+          for (const j of nearest) {
+            const key = i < j ? `${i}-${j}` : `${j}-${i}`
+            if (!connectionSet.has(key)) {
+              connectionSet.add(key)
+              connections.push({ a: i, b: j })
+            }
+          }
+        }
+        
+        // Draw ALL connections with progressive reveal
+        const lineOpacity = Math.min(0.4, progress * 0.6)
+        const visibleConnections = Math.floor(connections.length * Math.min(1, progress * 1.5))
+        
+        // Use LineSegments for better performance with many lines
+        const linePositions: number[] = []
+        for (let i = 0; i < visibleConnections; i++) {
+          const conn = connections[i]
+          const starA = networkStars[conn.a]
+          const starB = networkStars[conn.b]
+          linePositions.push(starA.x, starA.y, starA.z, starB.x, starB.y, starB.z)
+        }
+        
+        if (linePositions.length > 0) {
+          const lineGeo = new THREE.BufferGeometry()
+          lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3))
+          const lineMat = new THREE.LineBasicMaterial({ 
+            color: 0xaaaaaa, 
+            transparent: true, 
+            opacity: lineOpacity
+          })
+          group.add(new THREE.LineSegments(lineGeo, lineMat))
+        }
+        
+        // Show network stars as points
+        const starPositions: number[] = []
+        for (const star of networkStars) {
+          starPositions.push(star.x, star.y, star.z)
+        }
+        const starGeo = new THREE.BufferGeometry()
+        starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPositions, 3))
+        const starMat = new THREE.PointsMaterial({
+          color: 0xffffff,
+          size: sphereRadius * 0.012,
+          transparent: true,
+          opacity: 0.9,
+          sizeAttenuation: true
+        })
+        group.add(new THREE.Points(starGeo, starMat))
+      }
+    }
+    
+    // Phase 5: Zoom in, entire star network contracts toward focus star (50-65%)
+    else if (pathsValue <= 65) {
+      const progress = (pathsValue - 50) / 15 // 0 to 1
+      
+      // Focus star at sculpture centroid - this is the star we zoom into
+      const focusStarPos = pathCenter.clone()
+      
+      // Cull to ~1000 stars closest to sculpture centroid for the network
+      const maxNetworkStars = 1000
+      const sortedByDistance = [...stars].sort((a, b) => a.distanceTo(pathCenter) - b.distanceTo(pathCenter))
+      const networkStars = sortedByDistance.slice(0, maxNetworkStars)
+      
+      if (networkStars.length > 0) {
+        // Find nearest 3 neighbors for each star
+        const findNearest3 = (starIdx: number): number[] => {
+          const distances: { idx: number, dist: number }[] = []
+          for (let j = 0; j < networkStars.length; j++) {
+            if (j === starIdx) continue
+            const dist = networkStars[starIdx].distanceTo(networkStars[j])
+            distances.push({ idx: j, dist })
+          }
+          distances.sort((a, b) => a.dist - b.dist)
+          return distances.slice(0, 3).map(d => d.idx)
+        }
+        
+        // Build connection pairs
+        const connectionSet = new Set<string>()
+        const connections: { a: number, b: number }[] = []
+        
+        for (let i = 0; i < networkStars.length; i++) {
+          const nearest = findNearest3(i)
+          for (const j of nearest) {
+            const key = i < j ? `${i}-${j}` : `${j}-${i}`
+            if (!connectionSet.has(key)) {
+              connectionSet.add(key)
+              connections.push({ a: i, b: j })
+            }
+          }
+        }
+        
+        // Focus star size - starts small, grows as network contracts into it
+        const focusStarSize = sphereRadius * 0.01 * (1 + progress * 8)
+        
+        // Contract entire network toward focus star
+        // At progress=1, network should be the size of the focus star
+        const contractFactor = 1 - progress * 0.99 // Contract to 1% of original size
+        const networkScale = Math.max(focusStarSize / sphereRadius, contractFactor)
+        
+        // Draw contracted stars as points
+        const contractedPositions: THREE.Vector3[] = networkStars.map(star => {
+          return star.clone().multiplyScalar(networkScale)
+        })
+        
+        const starPositions: number[] = []
+        for (const pos of contractedPositions) {
+          starPositions.push(pos.x, pos.y, pos.z)
+        }
+        
+        const starGeo = new THREE.BufferGeometry()
+        starGeo.setAttribute('position', new THREE.Float32BufferAttribute(starPositions, 3))
+        const starMat = new THREE.PointsMaterial({
+          color: 0xffffff,
+          size: sphereRadius * 0.008 * (1 - progress * 0.7),
+          transparent: true,
+          opacity: (1 - progress * 0.8) * 0.9,
+          sizeAttenuation: true
+        })
+        group.add(new THREE.Points(starGeo, starMat))
+        
+        // Draw contracted connection lines using LineSegments for performance
+        const lineOpacity = (1 - progress * 0.9) * 0.4
+        if (lineOpacity > 0.01) {
+          const linePositions: number[] = []
+          for (const conn of connections) {
+            const posA = contractedPositions[conn.a]
+            const posB = contractedPositions[conn.b]
+            linePositions.push(posA.x, posA.y, posA.z, posB.x, posB.y, posB.z)
+          }
+          
+          if (linePositions.length > 0) {
+            const lineGeo = new THREE.BufferGeometry()
+            lineGeo.setAttribute('position', new THREE.Float32BufferAttribute(linePositions, 3))
+            const lineMat = new THREE.LineBasicMaterial({ 
+              color: 0x888888, 
+              transparent: true, 
+              opacity: lineOpacity
+            })
+            group.add(new THREE.LineSegments(lineGeo, lineMat))
+          }
+        }
+      }
+      
+      // Focus star - true sphere with sculpture material
+      const focusStarSize = sphereRadius * 0.01 * (1 + progress * 8)
+      const focusGeo = new THREE.SphereGeometry(focusStarSize, 64, 48)
+      const focusMat = materialController.getMaterial().clone()
+      focusMat.transparent = true
+      focusMat.opacity = 0.5 + progress * 0.5
+      const focusMesh = new THREE.Mesh(focusGeo, focusMat)
+      focusMesh.position.copy(focusStarPos)
+      group.add(focusMesh)
+    }
+    
+    // Phase 6: Flash as we penetrate the star (65-70%) - clear everything, flash to white
+    else if (pathsValue <= 70) {
+      const progress = (pathsValue - 65) / 5 // 0 to 1
+      
+      // Hide all scene objects
+      scene.children.forEach(child => {
+        if (child.name !== 'PATHS_GROUP') {
+          child.visible = false
+          child.traverse((obj) => { (obj as THREE.Object3D).visible = false })
+        }
+      })
+      
+      // Flash: fade scene background from dark to white
+      const bgColor = new THREE.Color(0x0a0a0a).lerp(new THREE.Color(0xffffff), progress)
+      scene.background = bgColor
+    }
+    
+    // Phase 7+: Pure white background with tiny speck that grows into lattice (70-100%)
+    else {
+      const progress = (pathsValue - 70) / 30 // 0 to 1 over full range
+      
+      // Hide all scene objects
+      scene.children.forEach(child => {
+        if (child.name !== 'PATHS_GROUP') {
+          child.visible = false
+          child.traverse((obj) => { (obj as THREE.Object3D).visible = false })
+        }
+      })
+      
+      // Pure white background - no sphere needed, just scene.background
+      scene.background = new THREE.Color(0xffffff)
+      
+      // Lattice scales slowly from tiny to full size (70-100%)
+      // Generate lattice points - 1.5x sculpture bounding sphere
+      const sculptRadius = sculptureRadiusRef.current
+      const latticeRadius = sculptRadius * 1.5
+      const allLatticePoints = latticePointsRef.current
+      const visibleLatticePoints = allLatticePoints.filter(p => p.distanceTo(pathCenter) < latticeRadius)
+      
+      // Lattice scale: starts very small, grows slowly to full size
+      const latticeScale = 0.001 + progress * 0.999
+      const latticeOpacity = Math.min(1, progress * 3) // Fade in quickly
+      
+      // Sphere size at lattice points
+      const maxSphereRadius = latticeConstant * 0.12
+      const nodeSphereSize = maxSphereRadius * latticeScale
+      
+      // Draw lattice spheres
+      if (visibleLatticePoints.length > 0 && nodeSphereSize > 0.0001) {
+        const sphereGeo = new THREE.SphereGeometry(nodeSphereSize, 16, 12)
+        const sphereMat = materialController.getMaterial().clone()
+        sphereMat.transparent = true
+        sphereMat.opacity = latticeOpacity
+        
+        const sphereMesh = new THREE.InstancedMesh(sphereGeo, sphereMat, visibleLatticePoints.length)
+        const dummy = new THREE.Object3D()
+        
+        visibleLatticePoints.forEach((p, i) => {
+          // Scale positions from center
+          const scaledPos = p.clone().sub(pathCenter).multiplyScalar(latticeScale).add(pathCenter)
+          dummy.position.copy(scaledPos)
+          dummy.updateMatrix()
+          sphereMesh.setMatrixAt(i, dummy.matrix)
+        })
+        sphereMesh.instanceMatrix.needsUpdate = true
+        group.add(sphereMesh)
+        
+        // Draw bonds between neighbors (sticks at 15% of sphere diameter)
+        if (progress > 0.2) {
+          const bondPairs: { start: THREE.Vector3, end: THREE.Vector3 }[] = []
+          // FCC nearest neighbor distance: only bonds at exactly latticeConstant (with tiny tolerance)
+          const neighborDist = latticeConstant * 1.02
+          
+          for (let i = 0; i < visibleLatticePoints.length; i++) {
+            for (let j = i + 1; j < visibleLatticePoints.length; j++) {
+              const dist = visibleLatticePoints[i].distanceTo(visibleLatticePoints[j])
+              if (dist < neighborDist) {
+                const startScaled = visibleLatticePoints[i].clone().sub(pathCenter).multiplyScalar(latticeScale).add(pathCenter)
+                const endScaled = visibleLatticePoints[j].clone().sub(pathCenter).multiplyScalar(latticeScale).add(pathCenter)
+                bondPairs.push({ start: startScaled, end: endScaled })
+              }
+            }
+          }
+          
+          if (bondPairs.length > 0) {
+            const tubeRadius = nodeSphereSize * 0.15
+            const tubeGeo = new THREE.CylinderGeometry(tubeRadius, tubeRadius, 1, 8, 1)
+            tubeGeo.rotateX(Math.PI / 2)
+            
+            const bondOpacity = Math.min(1, (progress - 0.2) * 1.5)
+            const tubeMat = materialController.getMaterial().clone()
+            tubeMat.transparent = true
+            tubeMat.opacity = bondOpacity
+            
+            const tubeMesh = new THREE.InstancedMesh(tubeGeo, tubeMat, bondPairs.length)
+            const matrix = new THREE.Matrix4()
+            const position = new THREE.Vector3()
+            const quaternion = new THREE.Quaternion()
+            const scale = new THREE.Vector3()
+            const up = new THREE.Vector3(0, 0, 1)
+            
+            bondPairs.forEach((bond, i) => {
+              position.lerpVectors(bond.start, bond.end, 0.5)
+              const direction = new THREE.Vector3().subVectors(bond.end, bond.start)
+              const length = direction.length()
+              direction.normalize()
+              quaternion.setFromUnitVectors(up, direction)
+              scale.set(1, 1, length)
+              matrix.compose(position, quaternion, scale)
+              tubeMesh.setMatrixAt(i, matrix)
+            })
+            tubeMesh.instanceMatrix.needsUpdate = true
+            group.add(tubeMesh)
+          }
+        }
       }
     }
     
     scene.add(group)
     pathsGroupRef.current = group
-  }, [pathsValue, showPaths, scene, galaxyStars])
+  }, [pathsValue, showPaths, scene])
 
   // Structure effect - lattice formation from stars
   const structureGroupRef = useRef<THREE.Group | null>(null)
@@ -1914,8 +2520,8 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     if (selectedStars.length > 1 && sphereRadiusFactor > 0.01) {
       const bondPairs: { start: THREE.Vector3, end: THREE.Vector3 }[] = []
       
-      // Neighbor distance is the lattice constant (grid spacing)
-      const neighborDist = latticeConstant * 1.1 // Small tolerance for floating point
+      // FCC nearest neighbor distance: only bonds at exactly latticeConstant (with tiny tolerance)
+      const neighborDist = latticeConstant * 1.02
       console.info(`[Structure] latticeConstant=${latticeConstant.toFixed(3)}, neighborDist=${neighborDist.toFixed(3)}, selectedStars=${selectedStars.length}`)
       
       // Check neighbor relationships using TARGET (lattice) positions
@@ -2146,7 +2752,8 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     // Draw dissolving bonds
     if (selectedStars.length > 1 && sphereOpacity > 0.01) {
       const bondPairs: { start: THREE.Vector3, end: THREE.Vector3 }[] = []
-      const neighborDist = latticeConstant * 1.1
+      // FCC nearest neighbor distance: only bonds at exactly latticeConstant (with tiny tolerance)
+      const neighborDist = latticeConstant * 1.02
       
       for (let i = 0; i < selectedStars.length; i++) {
         for (let j = i + 1; j < selectedStars.length; j++) {
@@ -2514,6 +3121,19 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
     profiledGroupRef.current = group
   }, [profiledValue, showProfiled, scene])
 
+  // Hide all chapter groups during Paths white phase (65%+)
+  useEffect(() => {
+    if (showPaths && pathsValue >= 65) {
+      if (structureGroupRef.current) structureGroupRef.current.visible = false
+      if (curvedGroupRef.current) curvedGroupRef.current.visible = false
+      if (profiledGroupRef.current) profiledGroupRef.current.visible = false
+    } else {
+      if (structureGroupRef.current) structureGroupRef.current.visible = true
+      if (curvedGroupRef.current) curvedGroupRef.current.visible = true
+      if (profiledGroupRef.current) profiledGroupRef.current.visible = true
+    }
+  }, [showPaths, pathsValue])
+
   // Track cleanup frames after AR exit
   const arCleanupFramesRef = useRef(0)
   
@@ -2527,41 +3147,7 @@ function DebugLoftScene({ loftProgress, straighten, onLoaded, autoRotate, rotate
   useFrame((_, delta) => {
     if (controlsRef.current) controlsRef.current.update()
     
-    // Animate shooting stars
-    if (showPaths && pathsValue <= 20 && shootingStarsRef.current.length > 0) {
-      shootingStarsRef.current.forEach(shooter => {
-        shooter.progress += delta * shooter.speed * 0.1
-        if (shooter.progress > 1) {
-          shooter.progress = 0
-          // Respawn at new random position
-          const stars = galaxyStarPositionsRef.current
-          const sphereRadius = sculptureRadiusRef.current * 3
-          const startIdx = Math.floor(Math.random() * Math.max(1, stars.length))
-          shooter.start = stars.length > 0 ? stars[startIdx].clone() : new THREE.Vector3(
-            (Math.random() - 0.5) * sphereRadius * 2,
-            (Math.random() - 0.5) * sphereRadius * 2,
-            (Math.random() - 0.5) * sphereRadius * 2
-          )
-          const direction = new THREE.Vector3(Math.random() - 0.5, Math.random() - 0.5, Math.random() - 0.5).normalize()
-          shooter.end = shooter.start.clone().add(direction.multiplyScalar(sphereRadius * 0.5))
-          shooter.speed = 0.03 + Math.random() * 0.05
-        }
-        
-        // Update line geometry - draw trail from current position back
-        const headPos = new THREE.Vector3().lerpVectors(shooter.start, shooter.end, shooter.progress)
-        const tailProgress = Math.max(0, shooter.progress - 0.15)
-        const tailPos = new THREE.Vector3().lerpVectors(shooter.start, shooter.end, tailProgress)
-        
-        const positions = shooter.line.geometry.attributes.position
-        positions.setXYZ(0, tailPos.x, tailPos.y, tailPos.z)
-        positions.setXYZ(1, headPos.x, headPos.y, headPos.z)
-        positions.needsUpdate = true
-        
-        // Fade based on progress
-        const material = shooter.line.material as THREE.LineBasicMaterial
-        material.opacity = shooter.progress < 0.1 ? shooter.progress * 8 : (1 - shooter.progress) * 1.2
-      })
-    }
+    // Shooting stars animation is now slider-driven, no frame animation needed
     
     // Animate shapes and constellations (phases 3a and 3b)
     if (showPaths && pathsValue > 40 && pathsValue <= 70 && animatedShapesRef.current.length > 0) {
@@ -2913,7 +3499,7 @@ export function AppLanding() {
   // Per-chapter play durations in milliseconds
   const chapterDurations = {
     points: 10000,     // 10 seconds
-    paths: 10000,      // 10 seconds
+    paths: 20000,      // 20 seconds
     structure: 15000,  // 15 seconds
     curved: 10000,     // 10 seconds
     profiled: 15000,   // 15 seconds
@@ -3373,7 +3959,22 @@ export function AppLanding() {
               </button>
               {designExpanded && (
                 <div style={{ paddingLeft: '12px', background: 'rgba(0,0,0,0.3)' }}>
-                  <button style={styles.dropdownItem} onClick={() => { setDesignPointsModalOpen(true); setActiveChapter('points'); setMenuOpen(false); }}>Points</button>
+                  <button style={styles.dropdownItem} onClick={() => { 
+                    // Clean up other chapters
+                    setPathsValue(0); 
+                    setStructureValue(0); 
+                    setCurvedValue(0); 
+                    setProfiledValue(0);
+                    setDesignPathsModalOpen(false);
+                    setDesignStructureModalOpen(false);
+                    setDesignCurvedModalOpen(false);
+                    setDesignProfiledModalOpen(false);
+                    // Reset Points chapter to start
+                    setGalaxyStarsValue(0);
+                    setDesignPointsModalOpen(true); 
+                    setActiveChapter('points'); 
+                    setMenuOpen(false); 
+                  }}>Points</button>
                   <button style={styles.dropdownItem} onClick={() => { setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setActiveChapter('paths'); setMenuOpen(false); }}>Paths</button>
                   <button style={styles.dropdownItem} onClick={() => { setDesignStructureModalOpen(true); setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setPathsValue(100); setActiveChapter('structure'); setMenuOpen(false); }}>Structure</button>
                   <button style={styles.dropdownItem} onClick={() => { setDesignCurvedModalOpen(true); setDesignStructureModalOpen(true); setDesignPathsModalOpen(true); setDesignPointsModalOpen(true); setGalaxyStarsValue(100); setPathsValue(100); setStructureValue(100); setActiveChapter('curved'); setMenuOpen(false); }}>Curved</button>
@@ -3421,39 +4022,39 @@ export function AppLanding() {
         
         if (activeChapter === 'points' || (activeChapter === 'story' && storyValue <= 20)) {
           const val = activeChapter === 'story' ? (storyValue / 20) * 100 : galaxyStarsValue
-          if (val <= 10) {
-            title = 'In The Beginning'
-            subtitle = 'There was nothing but infinite darkness...'
-          } else if (val <= 25) {
-            title = 'A Spark'
-            subtitle = 'A single point of light pierces the void'
-          } else if (val <= 50) {
-            title = 'Awakening'
-            subtitle = 'More points of light begin to emerge'
-          } else if (val <= 75) {
-            title = 'Multiplicity'
-            subtitle = 'The darkness fills with countless stars'
+          if (val <= 20) {
+            title = 'How This Sculpture Was Created'
+            subtitle = 'From its final form, we begin again.'
           } else {
-            title = 'The Cosmos'
-            subtitle = 'A universe of possibilities takes shape'
+            title = 'Points in Space'
+            subtitle = 'My sculptures are based on points in space.'
           }
         } else if (activeChapter === 'paths' || (activeChapter === 'story' && storyValue <= 40)) {
           const val = activeChapter === 'story' ? ((storyValue - 20) / 20) * 100 : pathsValue
           if (val <= 20) {
-            title = 'First Movement'
-            subtitle = 'Light begins to travel through space'
-          } else if (val <= 40) {
-            title = 'Seeking'
-            subtitle = 'Paths reach out, searching for connection'
-          } else if (val <= 60) {
-            title = 'Convergence'
-            subtitle = 'Distant points find each other'
-          } else if (val <= 80) {
-            title = 'The Path Emerges'
-            subtitle = 'A continuous journey begins to form'
+            // Phase 1-2: Galaxy stars and shooting stars (0-20%)
+            title = 'Lines in the Cosmos'
+            subtitle = 'Stars connect, forming fleeting shapes'
+          } else if (val <= 35) {
+            // Phase 3: Shapes form (20-35%)
+            title = 'From Stars to Symbols'
+            subtitle = 'Civilizations imagined meaning in these shapes'
+          } else if (val <= 50) {
+            // Phase 4: Faint connecting lines (35-50%)
+            title = 'Infinite Possible Paths'
+            subtitle = 'Every point connects to countless others'
+          } else if (val <= 70) {
+            // Phase 5-6: Contract and zoom into star (50-70%)
+            title = 'Diving Into the Light'
+            subtitle = "Let's explore the structure within a single star"
+          } else if (val <= 85) {
+            // Phase 7: White space, tiny black speck (70-85%)
+            title = 'Inside the Star'
+            subtitle = 'A tiny speck emerges from the light'
           } else {
-            title = 'Connected'
-            subtitle = 'All points united in one flowing path'
+            // Phase 8: Lattice reveal (85-100%)
+            title = 'The Atomic Structure'
+            subtitle = 'Within all matter, a hidden lattice awaits.'
           }
         } else if (activeChapter === 'structure' || (activeChapter === 'story' && storyValue <= 60)) {
           const val = activeChapter === 'story' ? ((storyValue - 40) / 20) * 100 : structureValue
